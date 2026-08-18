@@ -1,0 +1,17 @@
+server:
+  udp_address: ":9000"
+  http_address: ":8080"
+
+gateway:
+  worker_count: 128
+  read_buffer_size: 4194304
+  write_buffer_size: 4194304
+  session_timeout: 180s
+  reassembly_timeout: 120s
+  ack_timeout: 8s
+  max_retries: 4
+  max_message_size: 5242880
+
+storage:
+  image_directory: "./storage/images"
+  max_image_size: 5242880
