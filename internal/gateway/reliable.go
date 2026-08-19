@@ -9,85 +9,65 @@ import (
 	"satellite/internal/wire"
 )
 
+// pendingKey 以设备和消息为粒度标识服务端等待确认的整条下行消息。
 type pendingKey struct {
 	DeviceID  uint64
 	MessageID uint64
 }
 
+// pendingMessage 保存一条下行消息的全部编码分片及整组重传状态。
 type pendingMessage struct {
 	DeviceID  uint64
 	MessageID uint64
-	Packets   [][]byte
-	LastSent  time.Time
-	Retries   int
+	Packets   [][]byte  // Packets 是首次发送时编码好的完整数据报；超时后整组原样重发。
+	LastSent  time.Time // LastSent 是本组最近一次发送尝试时间，作为 ACK 超时起点。
+	Retries   int       // Retries 统计整组重传轮次，不统计首次发送。
 }
 
+// DeliveryState 表示 HTTP 查询可见的下行消息投递阶段。
 type DeliveryState string
 
+// 下行投递状态仅反映 UDP 可靠层，不表示设备业务逻辑已处理成功。
 const (
-	DeliveryPending   DeliveryState = "pending"
-	DeliveryDelivered DeliveryState = "delivered"
-	DeliveryFailed    DeliveryState = "failed"
+	DeliveryPending   DeliveryState = "pending"   // DeliveryPending 表示已开始发送但尚未收到设备 ACK。
+	DeliveryDelivered DeliveryState = "delivered" // DeliveryDelivered 表示收到该消息 ID 的设备 ACK。
+	DeliveryFailed    DeliveryState = "failed"    // DeliveryFailed 表示本地发送失败或重试次数耗尽。
 )
 
+// DeliveryStatus 是平台查询下行投递进度时返回的内存状态快照。
 type DeliveryStatus struct {
-	DeviceID  uint64        `json:"deviceId"`
-	MessageID uint64        `json:"messageId"`
-	State     DeliveryState `json:"state"`
-	Retries   int           `json:"retries"`
-	UpdatedAt time.Time     `json:"updatedAt"`
-	Error     string        `json:"error,omitempty"`
+	DeviceID  uint64        `json:"deviceId"`        // DeviceID 标识目标设备。
+	MessageID uint64        `json:"messageId"`       // MessageID 标识一次下行逻辑消息。
+	State     DeliveryState `json:"state"`           // State 是当前可靠层状态。
+	Retries   int           `json:"retries"`         // Retries 是已执行的整组重传次数。
+	UpdatedAt time.Time     `json:"updatedAt"`       // UpdatedAt 是状态或重试信息最后更新时间。
+	Error     string        `json:"error,omitempty"` // Error 保存最近失败原因，不用于承载设备业务响应。
 }
 
-func (g *Gateway) SendReliable(
-	deviceID uint64,
-	messageType wire.MessageType,
-	payload []byte,
-) (uint64, error) {
+// SendReliable 为主动下行分配消息 ID 并以需 ACK 的方式发送；成功不表示设备已经确认。
+func (g *Gateway) SendReliable(deviceID uint64, messageType wire.MessageType, payload []byte) (uint64, error) {
 	messageID := g.messageSequence.Add(1)
 
-	err := g.sendReliableWithID(
-		deviceID,
-		messageID,
-		messageType,
-		payload,
-	)
+	err := g.sendReliableWithID(deviceID, messageID, messageType, payload)
 
 	return messageID, err
 }
 
-func (g *Gateway) SendResponse(
-	deviceID uint64,
-	requestMessageID uint64,
-	payload []byte,
-) error {
-	return g.sendReliableWithID(
-		deviceID,
-		requestMessageID,
-		wire.TypeResponse,
-		payload,
-	)
+// SendResponse 可靠回送 RPC 响应，并复用请求的消息 ID 供设备关联请求和响应。
+// 该方法与主动下行一样等待消息级 ACK，返回 nil 仅表示首次发送已经完成。
+func (g *Gateway) SendResponse(deviceID uint64, requestMessageID uint64, payload []byte) error {
+	return g.sendReliableWithID(deviceID, requestMessageID, wire.TypeResponse, payload)
 }
 
-func (g *Gateway) sendReliableWithID(
-	deviceID uint64,
-	messageID uint64,
-	messageType wire.MessageType,
-	payload []byte,
-) error {
+// sendReliableWithID 查询设备最新会话，将逻辑消息切分并预编码为全部 UDP 数据报；
+// 它先登记消息级 pending 状态再首次发送，之后由 retryLoop 在 ACK 超时后整组重发。
+func (g *Gateway) sendReliableWithID(deviceID uint64, messageID uint64, messageType wire.MessageType, payload []byte) error {
 	session, exists := g.sessions.Get(deviceID)
 	if !exists {
 		return fmt.Errorf("device %d is offline", deviceID)
 	}
 
-	packets, err := wire.Fragment(
-		messageType,
-		wire.FlagNeedAck,
-		deviceID,
-		session.SessionID,
-		messageID,
-		payload,
-	)
+	packets, err := wire.Fragment(messageType, wire.FlagNeedAck, deviceID, session.SessionID, messageID, payload)
 	if err != nil {
 		return err
 	}
@@ -140,6 +120,7 @@ func (g *Gateway) sendReliableWithID(
 	return nil
 }
 
+// confirm 将设备和消息 ID 对应的整条下行消息标记为已送达；重复或迟到 ACK 保持幂等。
 func (g *Gateway) confirm(deviceID uint64, messageID uint64) {
 	key := pendingKey{
 		DeviceID:  deviceID,
@@ -189,10 +170,8 @@ func (g *Gateway) markFailed(key pendingKey, reason string) {
 	}
 }
 
-func (g *Gateway) GetDeliveryStatus(
-	deviceID uint64,
-	messageID uint64,
-) (DeliveryStatus, bool) {
+// GetDeliveryStatus 查询进程内投递状态；服务重启后状态不会恢复，终态记录保留 24 小时。
+func (g *Gateway) GetDeliveryStatus(deviceID uint64, messageID uint64) (DeliveryStatus, bool) {
 	key := pendingKey{
 		DeviceID:  deviceID,
 		MessageID: messageID,
@@ -205,6 +184,7 @@ func (g *Gateway) GetDeliveryStatus(
 	return status, exists
 }
 
+// retryLoop 每秒扫描一次待确认消息，直到网关上下文取消；具体超时判断由 retryExpiredMessages 完成。
 func (g *Gateway) retryLoop() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -219,6 +199,7 @@ func (g *Gateway) retryLoop() {
 	}
 }
 
+// retryExpiredMessages 对 ACK 超时消息执行整组重发；设备离线也会消耗重试额度。
 func (g *Gateway) retryExpiredMessages() {
 	now := time.Now()
 
@@ -299,6 +280,7 @@ func (g *Gateway) retryExpiredMessages() {
 	}
 }
 
+// cleanupDeliveryStatuses 删除更新时间超过 24 小时的成功或失败终态，待确认记录不在此处清理。
 func (g *Gateway) cleanupDeliveryStatuses() {
 	expiration := time.Now().Add(-24 * time.Hour)
 

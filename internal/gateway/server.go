@@ -369,17 +369,19 @@ func (s *Server) Addr() string {
 	return fmt.Sprint(s.conn.LocalAddr())
 }*/
 
+// Options 配置活动 Gateway 的并发容量、UDP 缓冲、虚拟会话、重组及消息级可靠发送策略。
 type Options struct {
-	WorkerCount       int
-	ReadBufferSize    int
-	WriteBufferSize   int
-	SessionTimeout    time.Duration
-	ReassemblyTimeout time.Duration
-	AckTimeout        time.Duration
-	MaxRetries        int
-	MaxMessageSize    int
+	WorkerCount       int           // WorkerCount 限制并发处理数据报的 goroutine 数，满载时丢包。
+	ReadBufferSize    int           // ReadBufferSize 是请求设置的操作系统 UDP 接收缓冲字节数。
+	WriteBufferSize   int           // WriteBufferSize 是请求设置的操作系统 UDP 发送缓冲字节数。
+	SessionTimeout    time.Duration // SessionTimeout 是设备无有效数据报后保持在线状态的时长。
+	ReassemblyTimeout time.Duration // ReassemblyTimeout 是不完整分片组在最后一个新分片后保留的时长。
+	AckTimeout        time.Duration // AckTimeout 是一条下行消息等待设备消息级 ACK 的时长。
+	MaxRetries        int           // MaxRetries 是下行消息全部分片整组重发的最大轮次。
+	MaxMessageSize    int           // MaxMessageSize 是单条逻辑消息重组或下发允许的最大总字节数。
 }
 
+// MessageHandler 接收通过协议校验、完整重组和消息去重后的业务负载。
 type MessageHandler func(
 	ctx context.Context,
 	packet *wire.Packet,
@@ -394,35 +396,32 @@ type dedupeKey struct {
 }
 
 type Gateway struct {
-	conn       *net.UDPConn
-	options    Options
-	sessions   *SessionManager
-	reassembly *Reassembler
-	handler    MessageHandler
+	conn       *net.UDPConn    // conn 是同时承载所有设备上下行数据报的服务端套接字。
+	options    Options         // options 是已补齐默认值的运行参数。
+	sessions   *SessionManager // sessions 将设备 ID 映射到最近 UDP 地址和会话。
+	reassembly *Reassembler    // reassembly 聚合设备上行的乱序分片。
+	handler    MessageHandler  // handler 只接收完整且未在窗口内重复的业务消息。
 
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx    context.Context    // ctx 控制接收相关后台维护循环的生命周期。
+	cancel context.CancelFunc // cancel 由 Close 调用以停止后台循环。
 
-	workers chan struct{}
+	workers chan struct{} // workers 是有界并发信号量，不承载数据报内容。
 
-	messageSequence atomic.Uint64
+	messageSequence atomic.Uint64 // messageSequence 为服务端主动下行分配高位为 1 的消息 ID。
 
-	pendingMu sync.Mutex
-	pending   map[pendingKey]*pendingMessage
-	delivery  map[pendingKey]DeliveryStatus
+	pendingMu sync.Mutex                     // pendingMu 共同保护待确认消息和投递状态。
+	pending   map[pendingKey]*pendingMessage // pending 保存等待消息级 ACK 的下行消息。
+	delivery  map[pendingKey]DeliveryStatus  // delivery 保存供 HTTP 查询的进程内投递状态。
 
-	dedupeMu sync.Mutex
-	dedupe   map[dedupeKey]time.Time
+	dedupeMu sync.Mutex              // dedupeMu 保护业务消息去重表。
+	dedupe   map[dedupeKey]time.Time // dedupe 的值是允许同一消息再次处理的时间。
 
-	closeOnce sync.Once
+	closeOnce sync.Once // closeOnce 保证取消上下文和关闭套接字只执行一次。
 }
 
-func NewGateway(
-	parentContext context.Context,
-	address string,
-	options Options,
-	handler MessageHandler,
-) (*Gateway, error) {
+// NewGateway 绑定 UDP 地址、应用缺省选项并初始化全部内存状态；它不启动接收或维护循环。
+// UDP 缓冲区设置失败只记录日志，因为操作系统可能调整或拒绝请求值而套接字仍可工作。
+func NewGateway(parentContext context.Context, address string, options Options, handler MessageHandler) (*Gateway, error) {
 	if parentContext == nil {
 		parentContext = context.Background()
 	}
@@ -480,6 +479,7 @@ func NewGateway(
 	return gateway, nil
 }
 
+// Serve 启动维护循环并持续收包；并发槽满时丢弃数据报，依赖可靠发送方后续重传。
 func (g *Gateway) Serve() error {
 	go g.retryLoop()
 	go g.cleanupLoop()
@@ -525,10 +525,7 @@ func (g *Gateway) Serve() error {
 	}
 }
 
-func (g *Gateway) handleDatagram(
-	data []byte,
-	address *net.UDPAddr,
-) {
+func (g *Gateway) handleDatagram(data []byte, address *net.UDPAddr) {
 	packet, err := wire.ParsePacket(data)
 	if err != nil {
 		log.Printf(
@@ -544,11 +541,7 @@ func (g *Gateway) handleDatagram(
 
 	   当前MVP只有CRC32，无法防止攻击者伪造DeviceID并劫持下行地址。
 	*/
-	g.sessions.Touch(
-		packet.DeviceID,
-		packet.SessionID,
-		address,
-	)
+	g.sessions.Touch(packet.DeviceID, packet.SessionID, address)
 
 	switch packet.Type {
 	case wire.TypeAck:
@@ -608,10 +601,9 @@ func (g *Gateway) handleDatagram(
 	}
 }
 
-func (g *Gateway) sendAck(
-	source *wire.Packet,
-	address *net.UDPAddr,
-) error {
+// sendAck 对整条已重组消息发送确认：ACK 复用设备、会话和消息 ID，但分片索引固定为 0、总数固定为 1。
+// 因此活动服务端的 ACK 粒度是消息而非逐片；发送端应在收到它后停止该消息整体的重传。
+func (g *Gateway) sendAck(source *wire.Packet, address *net.UDPAddr) error {
 	ack := &wire.Packet{
 		Type:          wire.TypeAck,
 		Flags:         0,
@@ -632,6 +624,7 @@ func (g *Gateway) sendAck(
 	return err
 }
 
+// isDuplicate 在十分钟窗口内阻止完整消息重复执行业务；重复消息在调用前仍会得到 ACK。
 func (g *Gateway) isDuplicate(packet *wire.Packet) bool {
 	key := dedupeKey{
 		DeviceID:  packet.DeviceID,
@@ -654,14 +647,17 @@ func (g *Gateway) isDuplicate(packet *wire.Packet) bool {
 	return false
 }
 
+// IsDeviceOnline 根据设备最近合法数据报时间和 SessionTimeout 判断其虚拟会话是否在线。
 func (g *Gateway) IsDeviceOnline(deviceID uint64) bool {
 	return g.sessions.IsOnline(deviceID)
 }
 
+// ListSessions 返回当前未超时设备虚拟会话的副本列表。
 func (g *Gateway) ListSessions() []*Session {
 	return g.sessions.List()
 }
 
+// cleanupLoop 定期清理超时会话、残缺重组、去重键和历史投递终态。
 func (g *Gateway) cleanupLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -680,6 +676,7 @@ func (g *Gateway) cleanupLoop() {
 	}
 }
 
+// cleanupDedupe 删除已超过十分钟业务去重窗口的消息键，使去重表不会无限增长。
 func (g *Gateway) cleanupDedupe() {
 	now := time.Now()
 
@@ -693,6 +690,7 @@ func (g *Gateway) cleanupDedupe() {
 	}
 }
 
+// Close 幂等地取消后台循环并关闭 UDP 套接字，以解除 Serve 中的阻塞读取。
 func (g *Gateway) Close() error {
 	var closeError error
 
@@ -704,6 +702,7 @@ func (g *Gateway) Close() error {
 	return closeError
 }
 
+// applyOptionDefaults 将非正选项替换为可运行的保守默认值。
 func applyOptionDefaults(options *Options) {
 	if options.WorkerCount <= 0 {
 		options.WorkerCount = 128

@@ -2,38 +2,44 @@ package config
 
 import (
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"os"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
+// Config 汇总进程监听地址、UDP 网关资源限制和上行图片落盘策略。
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	Gateway GatewayConfig `yaml:"gateway"`
-	Storage StorageConfig `yaml:"storage"`
+	Server  ServerConfig  `yaml:"server"`  // Server 配置对外提供的 UDP 与 HTTP 监听端点。
+	Gateway GatewayConfig `yaml:"gateway"` // Gateway 配置 UDP 并发、超时、重传与消息大小上限。
+	Storage StorageConfig `yaml:"storage"` // Storage 配置设备上行图片的本地文件存储。
 }
 
+// ServerConfig 定义同一进程中 UDP 设备入口和 HTTP 管理接口的监听地址。
 type ServerConfig struct {
-	UDPAddress  string `yaml:"udp_address"`
-	HTTPAddress string `yaml:"http_address"`
+	UDPAddress  string `yaml:"udp_address"`  // UDPAddress 是设备数据报网关的监听地址。
+	HTTPAddress string `yaml:"http_address"` // HTTPAddress 是平台下发消息及查询状态的 API 监听地址。
 }
 
+// GatewayConfig 控制 UDP 网关的容量与可靠传输时序。
 type GatewayConfig struct {
-	WorkerCount       int           `yaml:"worker_count"`
-	ReadBufferSize    int           `yaml:"read_buffer_size"`
-	WriteBufferSize   int           `yaml:"write_buffer_size"`
-	SessionTimeout    time.Duration `yaml:"session_timeout"`
-	ReassemblyTimeout time.Duration `yaml:"reassembly_timeout"`
-	AckTimeout        time.Duration `yaml:"ack_timeout"`
-	MaxRetries        int           `yaml:"max_retries"`
-	MaxMessageSize    int           `yaml:"max_message_size"`
+	WorkerCount       int           `yaml:"worker_count"`       // WorkerCount 是并发处理数据报的上限，满载时新包会被丢弃并依赖发送端重传。
+	ReadBufferSize    int           `yaml:"read_buffer_size"`   // ReadBufferSize 是操作系统 UDP 接收缓冲区的期望字节数。
+	WriteBufferSize   int           `yaml:"write_buffer_size"`  // WriteBufferSize 是操作系统 UDP 发送缓冲区的期望字节数。
+	SessionTimeout    time.Duration `yaml:"session_timeout"`    // SessionTimeout 是设备最后活动后仍被视为在线的时长。
+	ReassemblyTimeout time.Duration `yaml:"reassembly_timeout"` // ReassemblyTimeout 是未完成分片组在最后一次新分片后保留的时长。
+	AckTimeout        time.Duration `yaml:"ack_timeout"`        // AckTimeout 是服务端发送整条消息后等待设备消息级 ACK 的时长。
+	MaxRetries        int           `yaml:"max_retries"`        // MaxRetries 是 ACK 超时后的整组分片最大重发次数。
+	MaxMessageSize    int           `yaml:"max_message_size"`   // MaxMessageSize 是重组或下发的一条逻辑消息允许的最大总字节数。
 }
 
+// StorageConfig 定义上行图片在本机文件系统中的存储策略。
 type StorageConfig struct {
-	ImageDirectory string `yaml:"image_directory"`
-	MaxImageSize   int64  `yaml:"max_image_size"`
+	ImageDirectory string `yaml:"image_directory"` // ImageDirectory 是图片根目录，实际文件再按设备 ID 分目录保存。
+	MaxImageSize   int64  `yaml:"max_image_size"`  // MaxImageSize 是单张图片允许落盘和经 HTTP 上传的最大字节数。
 }
 
+// Default 返回可直接运行的完整默认配置；Load 会以它为基底补齐缺省或非正数配置项。
 func Default() Config {
 	return Config{
 		Server: ServerConfig{
@@ -57,6 +63,8 @@ func Default() Config {
 	}
 }
 
+// Load 在默认配置之上解析 YAML、补齐空值并校验跨字段大小约束。
+// 文件读取、YAML 解码或校验失败时返回当前配置和带上下文的错误。
 func Load(path string) (Config, error) {
 	cfg := Default()
 
@@ -78,6 +86,7 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// applyDefaults 将字符串空值和数值、时长的非正值视为未配置，并替换为默认值。
 func applyDefaults(cfg *Config) {
 	defaults := Default()
 
@@ -119,6 +128,7 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
+// validate 限制内存型分片重组的单消息规模，并保证图片上限不超过 UDP 逻辑消息上限。
 func validate(cfg Config) error {
 	if cfg.Gateway.MaxMessageSize > 64*1024*1024 {
 		return fmt.Errorf("gateway.max_message_size cannot exceed 64 MiB")

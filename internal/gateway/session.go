@@ -7,19 +7,23 @@ import (
 	"time"
 )
 
+// Session 是网关根据最近有效 UDP 数据报维护的设备虚拟会话。
+// UDP 本身无连接，Address 只是设备最近一次来源地址，可能因重拨或 NAT 映射变化而更新。
 type Session struct {
-	DeviceID  uint64
-	SessionID uint64
-	Address   *net.UDPAddr
-	LastSeen  time.Time
+	DeviceID  uint64       // DeviceID 是设备稳定标识，也是会话表的键。
+	SessionID uint64       // SessionID 区分同一设备的不同启动或通信周期。
+	Address   *net.UDPAddr // Address 是下行数据当前应发送到的最近来源地址。
+	LastSeen  time.Time    // LastSeen 是最后一次收到该设备合法协议包的本机时间。
 }
 
+// SessionManager 并发安全地按设备 ID 保存最新虚拟会话，并以空闲超时判断在线状态。
 type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[uint64]*Session
-	timeout  time.Duration
+	mu       sync.RWMutex        // mu 保护会话表及其中记录。
+	sessions map[uint64]*Session // sessions 每个设备只保留最新会话和地址。
+	timeout  time.Duration       // timeout 是在线判断及清理使用的空闲期限。
 }
 
+// NewSessionManager 创建使用指定空闲超时的内存会话管理器。
 func NewSessionManager(timeout time.Duration) *SessionManager {
 	return &SessionManager{
 		sessions: make(map[uint64]*Session),
@@ -27,11 +31,9 @@ func NewSessionManager(timeout time.Duration) *SessionManager {
 	}
 }
 
-func (m *SessionManager) Touch(
-	deviceID uint64,
-	sessionID uint64,
-	address *net.UDPAddr,
-) {
+// Touch 用数据报携带的会话 ID 和来源地址整体替换设备记录并刷新活跃时间。
+// 地址会被复制，避免调用方或网络库后续修改同一 UDPAddr；nil 地址不会创建会话。
+func (m *SessionManager) Touch(deviceID uint64, sessionID uint64, address *net.UDPAddr) {
 	if address == nil {
 		return
 	}
@@ -48,6 +50,7 @@ func (m *SessionManager) Touch(
 	m.mu.Unlock()
 }
 
+// Get 返回尚未空闲超时的会话副本；过期记录在 Cleanup 前仍可留在表内，但不会被视为在线。
 func (m *SessionManager) Get(deviceID uint64) (*Session, bool) {
 	m.mu.RLock()
 	session, exists := m.sessions[deviceID]
@@ -63,11 +66,13 @@ func (m *SessionManager) Get(deviceID uint64) (*Session, bool) {
 	return result, true
 }
 
+// IsOnline 报告设备是否存在未超时的最近 UDP 会话。
 func (m *SessionManager) IsOnline(deviceID uint64) bool {
 	_, exists := m.Get(deviceID)
 	return exists
 }
 
+// List 返回所有未超时会话的深拷贝快照，不暴露管理器内部地址指针。
 func (m *SessionManager) List() []*Session {
 	now := time.Now()
 
@@ -85,6 +90,7 @@ func (m *SessionManager) List() []*Session {
 	return result
 }
 
+// Cleanup 物理删除超过空闲时限的会话，释放地址引用及会话状态；在线判断本身不依赖本方法及时运行。
 func (m *SessionManager) Cleanup() {
 	now := time.Now()
 
@@ -98,6 +104,7 @@ func (m *SessionManager) Cleanup() {
 	}
 }
 
+// cloneSession 复制会话及 UDP 地址值，使读者不能修改共享状态。
 func cloneSession(session *Session) *Session {
 	if session == nil {
 		return nil

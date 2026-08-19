@@ -10,18 +10,21 @@ import (
 	"time"
 )
 
+// MessageService 处理重组完成的设备业务消息；当前文字仅记录日志，图片写入本地文件系统。
 type MessageService struct {
-	imageDirectory string
-	maxImageSize   int64
+	imageDirectory string // imageDirectory 是按设备 ID 建立子目录的图片存储根目录。
+	maxImageSize   int64  // maxImageSize 是写文件前再次执行的单图字节上限。
 }
 
+// LocationReport 是设备位置上报的 JSON 结构；经纬度必需，海拔和时间可省略。
 type LocationReport struct {
-	Longitude float64   `json:"longitude"`
-	Latitude  float64   `json:"latitude"`
-	Altitude  float64   `json:"altitude,omitempty"`
-	Timestamp time.Time `json:"timestamp,omitempty"`
+	Longitude float64   `json:"longitude"`           // Longitude 是范围 [-180, 180] 的经度。
+	Latitude  float64   `json:"latitude"`            // Latitude 是范围 [-90, 90] 的纬度。
+	Altitude  float64   `json:"altitude,omitempty"`  // Altitude 是协议未限定单位的可选海拔值。
+	Timestamp time.Time `json:"timestamp,omitempty"` // Timestamp 是采样时间，缺省时由服务端填入接收时间。
 }
 
+// NewMessageService 校验存储参数并预先创建图片根目录。
 func NewMessageService(imageDirectory string, maxImageSize int64) (*MessageService, error) {
 	if imageDirectory == "" {
 		return nil, errors.New("image directory cannot be empty")
@@ -41,6 +44,8 @@ func NewMessageService(imageDirectory string, maxImageSize int64) (*MessageServi
 	}, nil
 }
 
+// ReceiveText 接收一条已完成 UDP 重组和网关去重的文字消息。
+// 当前实现拒绝空文本并记录日志，不持久化内容；生产环境可用设备 ID 与消息 ID 作为幂等存储依据。
 func (s *MessageService) ReceiveText(deviceID uint64, messageID uint64, text string) error {
 	if text == "" {
 		return errors.New("text message cannot be empty")
@@ -69,6 +74,8 @@ func (s *MessageService) ReceiveText(deviceID uint64, messageID uint64, text str
 	return nil
 }
 
+// SaveImage 将重组后的完整图片按“根目录/设备 ID/消息 ID_时间戳.bin”保存并返回路径。
+// 它在落盘前独立限制图片大小；当前不识别格式，也不提供跨进程去重。
 func (s *MessageService) SaveImage(deviceID uint64, messageID uint64, data []byte) (string, error) {
 	if len(data) == 0 {
 		return "", errors.New("image data cannot be empty")
@@ -121,6 +128,8 @@ func (s *MessageService) SaveImage(deviceID uint64, messageID uint64, data []byt
 	return filePath, nil
 }
 
+// HandleLocationReport 解码并校验位置 JSON，缺少采样时间时使用服务端当前时间。
+// 当前实现只记录结果，不持久化位置轨迹。
 func (s *MessageService) HandleLocationReport(deviceID uint64, body []byte) error {
 	var report LocationReport
 

@@ -541,6 +541,7 @@ func handleRPCRequest(
 	return nil
 }
 
+// sendRPCErrorResponse 构造统一 JSON 错误正文和 RPC 元数据，并进入消息级 ACK/重传的可靠响应流程。
 func sendRPCErrorResponse(
 	udpGateway *gateway.Gateway,
 	packet *wire.Packet,
@@ -880,6 +881,7 @@ func createHTTPRouter(
 				return
 			}
 
+			// 与文字下发相同，HTTP 202 只表示网关已受理发送；设备确认结果需通过投递状态接口查询。
 			c.JSON(http.StatusAccepted, gin.H{
 				"success":     true,
 				"deviceId":    deviceID,
@@ -895,6 +897,7 @@ func createHTTPRouter(
 	return router
 }
 
+// parseDeviceID 解析必须为正整数的设备路径参数，失败时直接写入 HTTP 400 响应。
 func parseDeviceID(c *gin.Context) (uint64, bool) {
 	deviceID, err := strconv.ParseUint(
 		c.Param("deviceID"),

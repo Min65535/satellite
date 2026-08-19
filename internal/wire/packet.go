@@ -173,6 +173,7 @@ func ParsePacket(data []byte) (*Packet, error) {
 	return packet, nil
 }
 
+// validMessageType 报告消息类型是否落在当前协议连续定义的有效区间内；零值和未知扩展值均无效。
 func validMessageType(messageType MessageType) bool {
 	return messageType >= TypeHello && messageType <= TypeError
 }

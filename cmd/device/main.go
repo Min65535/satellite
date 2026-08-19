@@ -18,41 +18,47 @@ import (
 	"satellite/internal/wire"
 )
 
+// 设备模拟器采用逐分片 ACK 与重传：每个分片独立计时并最多重发 maxRetries 次。
 const (
-	retryInterval = 3 * time.Second
-	maxRetries    = 5
+	retryInterval = 3 * time.Second // retryInterval 是单个上行分片等待服务端 ACK 的间隔。
+	maxRetries    = 5               // maxRetries 是每个分片在首次发送后的最大重传次数。
 )
 
+// fragmentKey 精确标识等待 ACK 的一个上行分片，而不是整条消息。
 type fragmentKey struct {
 	messageID uint64
 	index     uint16
 }
 
+// messageKey 按消息 ID 和类型隔离下行重组缓存。
 type messageKey struct {
 	messageID uint64
 	typeID    wire.MessageType
 }
 
+// pendingPacket 保存单个上行分片的原始编码及逐片重传进度。
 type pendingPacket struct {
-	data      []byte
-	retries   int
-	nextRetry time.Time
+	data      []byte    // data 是可原样重发的完整 UDP 数据报。
+	retries   int       // retries 统计该分片已执行的重传次数。
+	nextRetry time.Time // nextRetry 是未收到对应分片 ACK 时的下一次发送时间。
 }
 
+// assembly 保存一条尚未完整收到的服务端下行消息。
 type assembly struct {
-	fragments [][]byte
-	received  int
+	fragments [][]byte // fragments 以分片索引为下标，nil 表示缺片。
+	received  int      // received 只统计首次收到的分片，重复包不增加计数。
 }
 
+// device 汇总模拟设备的 UDP 会话、消息序列以及受同一互斥锁保护的可靠传输状态。
 type device struct {
-	conn       *net.UDPConn
-	deviceID   uint64
-	sessionID  uint64
-	sequence   atomic.Uint64
-	mu         sync.Mutex
-	pending    map[fragmentKey]*pendingPacket
-	assemblies map[messageKey]*assembly
-	received   chan wire.MessageType
+	conn       *net.UDPConn                   // conn 是连接到固定网关地址的 UDP 套接字。
+	deviceID   uint64                         // deviceID 是服务端路由和会话表使用的稳定设备标识。
+	sessionID  uint64                         // sessionID 标识本次模拟器运行，避免旧分片混入新会话。
+	sequence   atomic.Uint64                  // sequence 为每条设备上行逻辑消息分配递增 ID。
+	mu         sync.Mutex                     // mu 同时保护 pending 和 assemblies。
+	pending    map[fragmentKey]*pendingPacket // pending 按分片等待 ACK，实现逐片重传。
+	assemblies map[messageKey]*assembly       // assemblies 保存尚未到齐的服务端下行分片。
+	received   chan wire.MessageType          // received 向主流程报告已完成重组的测试消息类型。
 }
 
 // main 启动模拟卫星设备并完成一次文字与图片的双向可靠 UDP 验证。
