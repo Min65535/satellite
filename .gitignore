@@ -115,3 +115,5 @@ Session.vim
 .codex
 .trae
 doc
+satellite_server
+satellite_client
