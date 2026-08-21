@@ -15,3 +15,6 @@ satellite communication in udp protocol
 
 ## communication architecture
 ![通信架构图](./images/communication_architecture.png)
+
+## mobile app communication flow
+![移动端通信流程图](./images/mobile_app_communication_flow.png)
