@@ -170,7 +170,7 @@ func (s *Server) Send(deviceID uint64, messageType wire.MessageType, payload []b
 }
 
 // send 使用指定 messageID 向设备当前会话可靠发送逻辑消息。
-// 它查询最近上报的设备 UDP 地址，将 payload 切成带 FlagNeedAck 的分片并逐片首次发送、登记重传；RPC 响应借此复用请求消息 ID。设备未知或任一分片处理失败时返回错误。
+// 它查询最近上报的设备 UDP 地址，将 payload 切成带 FlagNeedAck 的分片后依次首次发送，并按整条消息登记重传；RPC 响应借此复用请求消息 ID。设备未知或任一分片处理失败时返回错误。
 func (s *Server) send(deviceID uint64, messageType wire.MessageType, messageID uint64, payload []byte) error {
 	s.mu.Lock()
 	sess := s.sessions[deviceID]

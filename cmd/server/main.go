@@ -123,6 +123,7 @@ func main() {
 	) error {
 		switch packet.Type {
 		case wire.TypeText:
+			// 网关已在完整重组后返回空载荷 ACK；业务层只处理正文，不再把原消息回传给设备。
 			return messageService.ReceiveText(
 				packet.DeviceID,
 				packet.MessageID,
@@ -146,6 +147,7 @@ func main() {
 				filePath,
 			)
 
+			// 网关返回的空载荷 ACK 已表示图片完整到达；这里不再回传图片原始内容。
 			return nil
 
 		case wire.TypeRequest:

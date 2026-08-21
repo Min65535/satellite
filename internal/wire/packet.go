@@ -40,7 +40,7 @@ const (
 
 // 数据包标志位。多个标志可以通过按位或组合，并保存在包头的 Flags 字段中。
 const (
-	FlagNeedAck    uint16 = 1 << iota // FlagNeedAck 要求接收端对该分片回复 ACK，发送端据此实现可靠重传。
+	FlagNeedAck    uint16 = 1 << iota // FlagNeedAck 表示所属逻辑消息需要确认；接收端应在全部分片重组完成后回复一次消息级 ACK。
 	FlagEncrypted                     // FlagEncrypted 表示 Payload 已加密，具体加解密算法由上层约定和执行。
 	FlagCompressed                    // FlagCompressed 表示 Payload 已压缩，接收端重组后需按约定解压。
 )
