@@ -204,6 +204,7 @@ func main() {
 			AckTimeout:        cfg.Gateway.AckTimeout,
 			MaxRetries:        cfg.Gateway.MaxRetries,
 			MaxMessageSize:    cfg.Gateway.MaxMessageSize,
+			ProxyProtocolV2:   cfg.Gateway.ProxyProtocolV2,
 		},
 		messageHandler,
 	)
@@ -636,18 +637,23 @@ func createHTTPRouter(
 			result := make([]gin.H, 0, len(sessions))
 
 			for _, session := range sessions {
-				address := ""
+				clientAddress := ""
+				transportAddress := ""
 
-				if session.Address != nil {
-					address = session.Address.String()
+				if session.ClientAddress != nil {
+					clientAddress = session.ClientAddress.String()
+				}
+				if session.TransportAddress != nil {
+					transportAddress = session.TransportAddress.String()
 				}
 
 				result = append(result, gin.H{
-					"deviceId":  session.DeviceID,
-					"sessionId": session.SessionID,
-					"address":   address,
-					"lastSeen":  session.LastSeen,
-					"online":    true,
+					"deviceId":         session.DeviceID,
+					"sessionId":        session.SessionID,
+					"clientAddress":    clientAddress,
+					"transportAddress": transportAddress,
+					"lastSeen":         session.LastSeen,
+					"online":           true,
 				})
 			}
 

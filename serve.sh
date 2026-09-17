@@ -21,7 +21,14 @@ fi
 cd "${ROOT_DIR}"
 
 echo "正在编译卫星服务端..."
-go build -o "${BINARY_PATH}" ./cmd/server
+CGO_ENABLED=0 GOOS=linux GOARCH="${GOARCH:-amd64}" \
+go build \
+  -tags="netgo osusergo" \
+  -trimpath \
+  -ldflags="-s -w" \
+  -o "${BINARY_PATH}" \
+  ./cmd/server
+#go build -o "${BINARY_PATH}" ./cmd/server
 
 echo "正在启动卫星服务端，配置文件: ${CONFIG_PATH}"
 exec "${BINARY_PATH}" -config "${CONFIG_PATH}" "$@"

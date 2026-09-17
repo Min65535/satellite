@@ -111,7 +111,7 @@ func (g *Gateway) sendReliableWithID(deviceID uint64, messageID uint64, messageT
 	g.pendingMu.Unlock()
 
 	for _, data := range encodedPackets {
-		if _, err := g.conn.WriteToUDP(data, session.Address); err != nil {
+		if _, err := g.conn.WriteToUDP(data, session.TransportAddress); err != nil {
 			g.markFailed(key, err.Error())
 			return err
 		}
@@ -253,7 +253,7 @@ func (g *Gateway) retryExpiredMessages() {
 		writeFailed := false
 
 		for _, data := range pending.Packets {
-			if _, err := g.conn.WriteToUDP(data, session.Address); err != nil {
+			if _, err := g.conn.WriteToUDP(data, session.TransportAddress); err != nil {
 				log.Printf(
 					"retransmit failed: device=%d message=%d error=%v",
 					key.DeviceID,

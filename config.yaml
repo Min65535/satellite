@@ -1,5 +1,5 @@
 server:
-  udp_address: ":9000"
+  udp_address: ":8308"
   http_address: ":8080"
 
 gateway:
@@ -11,6 +11,8 @@ gateway:
   ack_timeout: 8s
   max_retries: 4
   max_message_size: 5242880
+  # 与 frpc 的 transport.proxyProtocolVersion = "v2" 配套，用于获取客户端真实公网 IP 和端口。
+  proxy_protocol_v2: true
 
 storage:
   image_directory: "./storage/images"

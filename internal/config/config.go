@@ -31,6 +31,7 @@ type GatewayConfig struct {
 	AckTimeout        time.Duration `yaml:"ack_timeout"`        // AckTimeout 是服务端发送整条消息后等待设备消息级 ACK 的时长。
 	MaxRetries        int           `yaml:"max_retries"`        // MaxRetries 是 ACK 超时后的整组分片最大重发次数。
 	MaxMessageSize    int           `yaml:"max_message_size"`   // MaxMessageSize 是重组或下发的一条逻辑消息允许的最大总字节数。
+	ProxyProtocolV2   bool          `yaml:"proxy_protocol_v2"`  // ProxyProtocolV2 要求每个 FRP UDP 数据报携带 Proxy Protocol v2 头并从中提取真实公网地址。
 }
 
 // StorageConfig 定义上行图片在本机文件系统中的存储策略。

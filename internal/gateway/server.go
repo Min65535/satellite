@@ -379,6 +379,7 @@ type Options struct {
 	AckTimeout        time.Duration // AckTimeout 是一条下行消息等待设备消息级 ACK 的时长。
 	MaxRetries        int           // MaxRetries 是下行消息全部分片整组重发的最大轮次。
 	MaxMessageSize    int           // MaxMessageSize 是单条逻辑消息重组或下发允许的最大总字节数。
+	ProxyProtocolV2   bool          // ProxyProtocolV2 要求解析 FRP 为每个 UDP 数据报添加的 Proxy Protocol v2 头。
 }
 
 // MessageHandler 接收通过协议校验、完整重组和消息去重后的业务负载。
@@ -525,12 +526,25 @@ func (g *Gateway) Serve() error {
 	}
 }
 
-func (g *Gateway) handleDatagram(data []byte, address *net.UDPAddr) {
-	packet, err := wire.ParsePacket(data)
+func (g *Gateway) handleDatagram(data []byte, transportAddress *net.UDPAddr) {
+	clientAddress := transportAddress
+	payload := data
+
+	if g.options.ProxyProtocolV2 {
+		var err error
+		clientAddress, payload, err = parseProxyProtocolV2(data)
+		if err != nil {
+			log.Printf("discard invalid Proxy Protocol v2 datagram from %s: %v", transportAddress, err)
+			return
+		}
+	}
+
+	packet, err := wire.ParsePacket(payload)
 	if err != nil {
 		log.Printf(
-			"discard invalid UDP packet from %s: %v",
-			address,
+			"discard invalid UDP packet from client=%s transport=%s: %v",
+			clientAddress,
+			transportAddress,
 			err,
 		)
 		return
@@ -541,7 +555,8 @@ func (g *Gateway) handleDatagram(data []byte, address *net.UDPAddr) {
 
 	   当前MVP只有CRC32，无法防止攻击者伪造DeviceID并劫持下行地址。
 	*/
-	g.sessions.Touch(packet.DeviceID, packet.SessionID, address)
+	// 真实地址仅用于识别和审计；所有 ACK 与下行数据仍经 transportAddress 返回 FRP。
+	g.sessions.Touch(packet.DeviceID, packet.SessionID, clientAddress, transportAddress)
 
 	switch packet.Type {
 	case wire.TypeAck:
@@ -549,7 +564,15 @@ func (g *Gateway) handleDatagram(data []byte, address *net.UDPAddr) {
 		return
 
 	case wire.TypeHello, wire.TypeHeartbeat:
-		if err := g.sendAck(packet, address); err != nil {
+		if packet.Type == wire.TypeHello {
+			log.Printf(
+				"device online: device=%d client=%s transport=%s",
+				packet.DeviceID,
+				clientAddress,
+				transportAddress,
+			)
+		}
+		if err := g.sendAck(packet, transportAddress); err != nil {
 			log.Printf("send heartbeat ACK failed: %v", err)
 		}
 		return
@@ -571,7 +594,7 @@ func (g *Gateway) handleDatagram(data []byte, address *net.UDPAddr) {
 	}
 
 	if packet.Flags&wire.FlagNeedAck != 0 {
-		if err := g.sendAck(packet, address); err != nil {
+		if err := g.sendAck(packet, transportAddress); err != nil {
 			log.Printf("send message ACK failed: %v", err)
 		}
 	}

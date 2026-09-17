@@ -19,7 +19,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY_PATH="${ROOT_DIR}/satellite_client"
-SERVER_ADDRESS="${1:-${SERVER_ADDRESS:-127.0.0.1:9000}}"
+#SERVER_ADDRESS="${1:-${SERVER_ADDRESS:-127.0.0.1:8308}}"
+#SERVER_ADDRESS="${1:-${SERVER_ADDRESS:-192.168.3.47:8308}}"
 DEVICE_ID="${2:-${DEVICE_ID:-10001}}"
 IMAGE_PATH="${3:-${IMAGE_PATH:-}}"
 
