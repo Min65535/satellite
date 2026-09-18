@@ -18,3 +18,9 @@ satellite communication in udp protocol
 
 ## mobile app communication flow
 ![移动端通信流程图](./images/mobile_app_communication_flow.png)
+
+## run server
+./server.exe -config .\config.yaml
+
+## run device
+./device.exe -server=192.168.3.47:8308 -device=100001 -image=./images/1.jpg

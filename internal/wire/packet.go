@@ -28,19 +28,19 @@ type MessageType uint8
 
 // 协议支持的消息类型。数值从 1 开始，0 保留为未定义值，便于发现未初始化字段。
 const (
-	TypeHello     MessageType = iota + 1 // TypeHello 表示设备上线或建立新会话，服务端据此记录设备地址。
-	TypeHeartbeat                        // TypeHeartbeat 表示设备心跳，用于刷新会话活跃时间和最新 UDP 地址。
-	TypeAck                              // TypeAck 表示分片确认，通知发送端停止重传对应分片。
-	TypeText                             // TypeText 表示 UTF-8 文字业务消息，较长文字可以拆分为多个分片。
-	TypeImage                            // TypeImage 表示图片二进制业务消息，通常需要分片传输和重组。
-	TypeRequest                          // TypeRequest 表示设备发起的类 HTTP RPC 请求。
-	TypeResponse                         // TypeResponse 表示服务端返回的 RPC 响应，与请求共用 MessageID。
-	TypeError                            // TypeError 表示协议层或业务层错误消息，供扩展统一错误通知。
+	TypeHello       MessageType = iota + 1 // TypeHello 表示设备上线或建立新会话，服务端据此记录设备地址。
+	TypeHeartbeat                          // TypeHeartbeat 表示设备心跳，用于刷新会话活跃时间和最新 UDP 地址。
+	TypeAck                                // TypeAck 表示分片确认，通知发送端停止重传对应分片。客户端与服务端都要确认
+	TypeText                               // TypeText 表示 UTF-8 文字业务消息，较长文字可以拆分为多个分片。
+	TypeImage                              // TypeImage 表示图片二进制业务消息，通常需要分片传输和重组。
+	TypeBizRequest                         // TypeBizRequest 表示设备发起自定义的业务请求。
+	TypeBizResponse                        // TypeBizResponse 表示服务端返回的自定义的业务响应，与请求共用 MessageID。
+	TypeError                              // TypeError 表示协议层或业务层错误消息，供扩展统一错误通知。
 )
 
 // 数据包标志位。多个标志可以通过按位或组合，并保存在包头的 Flags 字段中。
 const (
-	FlagNeedAck    uint16 = 1 << iota // FlagNeedAck 表示所属逻辑消息需要确认；接收端应在全部分片重组完成后回复一次消息级 ACK。
+	FlagNeedAck    uint16 = 1 << iota // FlagNeedAck 表示当前分片需要确认；接收端校验并接纳该分片后应立即回复对应分片 ACK。
 	FlagEncrypted                     // FlagEncrypted 表示 Payload 已加密，具体加解密算法由上层约定和执行。
 	FlagCompressed                    // FlagCompressed 表示 Payload 已压缩，接收端重组后需按约定解压。
 )

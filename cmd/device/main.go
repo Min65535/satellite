@@ -18,10 +18,10 @@ import (
 	"satellite/internal/wire"
 )
 
-// 设备模拟器与服务端统一采用消息级 ACK 和整组重传。
+// 设备模拟器与服务端统一采用逐分片 ACK，并只重传未确认分片。
 const (
-	retryInterval       = 3 * time.Second  // retryInterval 是整条上行消息等待服务端 ACK 的间隔。
-	maxRetries          = 5                // maxRetries 是整条消息在首次发送后的最大重传轮次。
+	retryInterval       = 3 * time.Second  // retryInterval 是单个上行分片等待服务端 ACK 的间隔。
+	maxRetries          = 5                // maxRetries 是单个分片在首次发送后的最大重传次数。
 	reassemblyTimeout   = 2 * time.Minute  // reassemblyTimeout 是不完整下行消息允许占用内存的最长空闲时间。
 	completedRetention  = 10 * time.Minute // completedRetention 是完成消息去重记录的保留时间，覆盖服务端可能发生的迟到重传。
 	maxFragmentCount    = 8192             // maxFragmentCount 限制单条消息声明的最大分片数，避免异常包触发过量内存分配。
@@ -36,11 +36,12 @@ type messageKey struct {
 	typeID    wire.MessageType // typeID 防止复用消息 ID 的不同业务类型互相拼接。
 }
 
-// pendingMessage 保存一条上行消息的全部编码分片及整组重传进度。
+// pendingMessage 保存一条上行消息中尚未确认的分片及各自重传进度。
 type pendingMessage struct {
-	packets   [][]byte  // packets 是首次发送时编码好的全部 UDP 数据报。
-	retries   int       // retries 统计整组分片已经执行的重传轮次。
-	nextRetry time.Time // nextRetry 是未收到消息级 ACK 时的下一次整组发送时间。
+	fragmentCount uint16
+	packets       map[uint16][]byte
+	retries       map[uint16]int
+	nextRetry     map[uint16]time.Time
 }
 
 // assembly 保存一条尚未完整收到的服务端下行消息及其资源使用状态。
@@ -59,14 +60,14 @@ type device struct {
 	sessionID  uint64                     // sessionID 标识本次模拟器运行，避免旧分片混入新会话。
 	sequence   atomic.Uint64              // sequence 为每条设备上行逻辑消息分配递增 ID。
 	mu         sync.Mutex                 // mu 同时保护 pending、assemblies 和 completed。
-	pending    map[uint64]*pendingMessage // pending 按消息 ID 等待 ACK，并在超时后整组重传。
+	pending    map[uint64]*pendingMessage // pending 按消息 ID 保存尚未确认的分片，并按片执行超时重传。
 	assemblies map[messageKey]*assembly   // assemblies 保存尚未到齐的服务端下行分片。
 	completed  map[messageKey]time.Time   // completed 保存近期完整处理的消息；重复消息只再次 ACK，不重复执行业务。
 	confirmed  chan uint64                // confirmed 向主流程报告服务端已经完整收到的上行消息 ID。
 }
 
 // main 启动模拟卫星设备并验证文字与图片的可靠 UDP 上行流程。
-// 它发送需确认的分片消息，并等待服务端在完整重组后分别返回空载荷消息级 ACK；服务端不会回传文字或图片原文。初始化、发送或等待超时等致命错误会记录日志并退出进程。
+// 它发送需确认的分片消息，并等待服务端逐片返回空载荷 ACK；服务端不会回传文字或图片原文。初始化、发送或等待超时等致命错误会记录日志并退出进程。
 func main() {
 	serverAddress := flag.String("server", "127.0.0.1:9000", "服务端 UDP 地址")
 	deviceID := flag.Uint64("device", 10001, "设备 ID")
@@ -150,7 +151,7 @@ func fragmentCount(payload []byte) int {
 }
 
 // send 将一条设备上行逻辑消息分片并写入已连接的 UDP 套接字，返回分配的消息 ID。
-// reliable 为 true 时，全部编码分片会按 MessageID 登记为一个待确认消息；服务端完成重组后只返回空载荷消息级 ACK，超时则整组重传。
+// reliable 为 true 时，每个编码分片都会登记等待 ACK；超时只重传尚未确认的分片。
 func (d *device) send(messageType wire.MessageType, payload []byte, reliable bool) (uint64, error) {
 	flags := uint16(0)
 	if reliable {
@@ -162,22 +163,24 @@ func (d *device) send(messageType wire.MessageType, payload []byte, reliable boo
 		return 0, err
 	}
 
-	encodedPackets := make([][]byte, 0, len(packets))
+	encodedPackets := make(map[uint16][]byte, len(packets))
 	for _, packet := range packets {
 		data, err := packet.MarshalBinary()
 		if err != nil {
 			return 0, err
 		}
-		encodedPackets = append(encodedPackets, data)
+		encodedPackets[packet.FragmentIndex] = data
 	}
 
 	// 先登记再发送，避免服务端快速返回 ACK 时待确认记录尚未建立。
 	if reliable {
-		d.mu.Lock()
-		d.pending[messageID] = &pendingMessage{
-			packets:   encodedPackets,
-			nextRetry: time.Now().Add(retryInterval),
+		retries := make(map[uint16]int, len(encodedPackets))
+		nextRetry := make(map[uint16]time.Time, len(encodedPackets))
+		for index := range encodedPackets {
+			nextRetry[index] = time.Now().Add(retryInterval)
 		}
+		d.mu.Lock()
+		d.pending[messageID] = &pendingMessage{fragmentCount: uint16(len(packets)), packets: encodedPackets, retries: retries, nextRetry: nextRetry}
 		d.mu.Unlock()
 	}
 
@@ -195,7 +198,7 @@ func (d *device) send(messageType wire.MessageType, payload []byte, reliable boo
 }
 
 // receive 持续接收服务端 UDP 数据，直到 ctx 取消或套接字读取失败。
-// 它丢弃协议校验失败的数据包；收到 ACK 时移除对应待重传消息。业务分片只有全部到齐并成功重组后才回复消息级 ACK，确保服务端确认的是完整消息而非单个分片。该方法还启动一个上下文监听回调，通过关闭套接字解除阻塞读取。
+// 它丢弃协议校验失败的数据包；收到 ACK 时移除对应待重传分片。每个合法业务分片进入重组流程后立即回复分片 ACK。该方法还启动一个上下文监听回调，通过关闭套接字解除阻塞读取。
 func (d *device) receive(ctx context.Context) {
 	// 此后台回调在上下文结束时关闭连接，使阻塞中的 Read 能及时返回。
 	go func() {
@@ -223,11 +226,22 @@ func (d *device) receive(ctx context.Context) {
 		}
 		if packet.Type == wire.TypeAck {
 			d.mu.Lock()
-			_, confirmed := d.pending[packet.MessageID]
-			delete(d.pending, packet.MessageID)
+			item := d.pending[packet.MessageID]
+			confirmed := false
+			if item != nil && packet.FragmentCount == item.fragmentCount {
+				if _, exists := item.packets[packet.FragmentIndex]; exists {
+					delete(item.packets, packet.FragmentIndex)
+					delete(item.retries, packet.FragmentIndex)
+					delete(item.nextRetry, packet.FragmentIndex)
+					if len(item.packets) == 0 {
+						delete(d.pending, packet.MessageID)
+						confirmed = true
+					}
+				}
+			}
 			d.mu.Unlock()
 			if confirmed {
-				log.Printf("服务端已完整收到消息：message=%d", packet.MessageID)
+				log.Printf("服务端已确认全部分片：message=%d", packet.MessageID)
 				d.confirmed <- packet.MessageID
 			}
 			continue
@@ -238,31 +252,23 @@ func (d *device) receive(ctx context.Context) {
 			log.Printf("丢弃无法重组的消息：message=%d err=%v", packet.MessageID, err)
 			continue
 		}
-		if duplicate {
-			// 上一次 ACK 可能丢失；重复消息仍需再次确认，但绝不能重复执行业务。
-			if packet.Flags&wire.FlagNeedAck != 0 {
-				d.sendACK(packet)
-			}
-			continue
-		}
-		if !completed {
-			continue
-		}
-
-		// 完整重组且登记去重状态后才发送消息级 ACK，再交给业务逻辑处理。
 		if packet.Flags&wire.FlagNeedAck != 0 {
 			d.sendACK(packet)
 		}
+		if duplicate || !completed {
+			continue
+		}
+
 		d.handleMessage(packet, payload)
 	}
 }
 
-// sendACK 向服务端确认一条下行消息已经完整重组。
-// ACK 只通过消息 ID 确认整条消息，因此自身固定为单分片结构；ACK 不要求再次确认，编码或发送错误由服务端超时重传原消息来恢复。
+// sendACK 向服务端确认一个已通过校验并进入重组流程的下行分片。
+// ACK 携带原分片索引和总数；ACK 本身不要求确认，丢失时发送端会重传对应分片。
 func (d *device) sendACK(packet *wire.Packet) {
 	ack := &wire.Packet{
 		Type: wire.TypeAck, DeviceID: d.deviceID, SessionID: d.sessionID,
-		MessageID: packet.MessageID, FragmentIndex: 0, FragmentCount: 1,
+		MessageID: packet.MessageID, FragmentIndex: packet.FragmentIndex, FragmentCount: packet.FragmentCount,
 	}
 	data, err := ack.MarshalBinary()
 	if err == nil {
@@ -272,7 +278,7 @@ func (d *device) sendACK(packet *wire.Packet) {
 
 // addFragment 校验并缓存一个下行分片，返回完整负载、是否完成、是否为近期已完成消息以及错误。
 // 重组键包含会话、消息 ID 和类型；函数限制分片数、并发组数和累计大小，并要求同组分片的总数及 Flags 一致。
-// 完整消息会先写入 completed 去重表再返回，确保调用方发送 ACK 后即使收到整组重传也不会重复执行业务。
+// 完整消息会先写入 completed 去重表再返回，确保后续重复分片只回复 ACK 而不会重复执行业务。
 func (d *device) addFragment(packet *wire.Packet) ([]byte, bool, bool, error) {
 	if int(packet.FragmentCount) > maxFragmentCount {
 		return nil, false, false, fmt.Errorf("分片数 %d 超过上限 %d", packet.FragmentCount, maxFragmentCount)
@@ -348,7 +354,7 @@ func (d *device) handleMessage(packet *wire.Packet, payload []byte) {
 }
 
 // maintenance 周期维护设备端可靠传输状态，直到 ctx 取消。
-// 它清理超时重组项和过期去重记录，并检查待确认上行消息；ACK 超时后整组重发全部分片，重试耗尽后记录失败。
+// 它清理超时重组项和去重记录，并只重传超过等待时间的未确认上行分片。
 func (d *device) maintenance(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -358,7 +364,6 @@ func (d *device) maintenance(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			d.mu.Lock()
-			// 清除无法补齐的重组项和过期去重记录，避免设备长期运行时内存持续增长。
 			for key, item := range d.assemblies {
 				if now.After(item.expiresAt) {
 					delete(d.assemblies, key)
@@ -370,20 +375,24 @@ func (d *device) maintenance(ctx context.Context) {
 				}
 			}
 			for messageID, item := range d.pending {
-				if now.Before(item.nextRetry) {
-					continue
-				}
-				if item.retries >= maxRetries {
-					log.Printf("消息重传失败：message=%d fragments=%d", messageID, len(item.packets))
-					delete(d.pending, messageID)
-					continue
-				}
-				for _, data := range item.packets {
+				failed := false
+				for index, data := range item.packets {
+					if now.Before(item.nextRetry[index]) {
+						continue
+					}
+					if item.retries[index] >= maxRetries {
+						log.Printf("分片重传失败：message=%d fragment=%d", messageID, index)
+						failed = true
+						break
+					}
 					_, _ = d.conn.Write(data)
+					item.retries[index]++
+					item.nextRetry[index] = now.Add(retryInterval)
+					log.Printf("分片重传：message=%d fragment=%d retries=%d", messageID, index, item.retries[index])
 				}
-				item.retries++
-				item.nextRetry = now.Add(retryInterval)
-				log.Printf("消息整组重传：message=%d retries=%d fragments=%d", messageID, item.retries, len(item.packets))
+				if failed {
+					delete(d.pending, messageID)
+				}
 			}
 			d.mu.Unlock()
 		}

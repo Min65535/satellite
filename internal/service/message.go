@@ -1,7 +1,6 @@
 package service
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,14 +13,6 @@ import (
 type MessageService struct {
 	imageDirectory string // imageDirectory 是按设备 ID 建立子目录的图片存储根目录。
 	maxImageSize   int64  // maxImageSize 是写文件前再次执行的单图字节上限。
-}
-
-// LocationReport 是设备位置上报的 JSON 结构；经纬度必需，海拔和时间可省略。
-type LocationReport struct {
-	Longitude float64   `json:"longitude"`           // Longitude 是范围 [-180, 180] 的经度。
-	Latitude  float64   `json:"latitude"`            // Latitude 是范围 [-90, 90] 的纬度。
-	Altitude  float64   `json:"altitude,omitempty"`  // Altitude 是协议未限定单位的可选海拔值。
-	Timestamp time.Time `json:"timestamp,omitempty"` // Timestamp 是采样时间，缺省时由服务端填入接收时间。
 }
 
 // NewMessageService 校验存储参数并预先创建图片根目录。
@@ -70,6 +61,24 @@ func (s *MessageService) ReceiveText(deviceID uint64, messageID uint64, text str
 	       created_at
 	   )
 	*/
+
+	return nil
+}
+
+// ReceiveBizRequest 接收一条已完成分片重组、CRC 校验和消息去重的自定义业务请求。
+// payload 的具体编码由设备与服务端业务协议约定；当前实现保留原始字节并记录接收日志。
+func (s *MessageService) ReceiveBizRequest(deviceID uint64, messageID uint64, payload []byte) error {
+	if len(payload) == 0 {
+		return errors.New("business request payload cannot be empty")
+	}
+
+	log.Printf(
+		"received business request: device=%d message=%d size=%d payload=%x",
+		deviceID,
+		messageID,
+		len(payload),
+		payload,
+	)
 
 	return nil
 }
@@ -126,37 +135,4 @@ func (s *MessageService) SaveImage(deviceID uint64, messageID uint64, data []byt
 	)
 
 	return filePath, nil
-}
-
-// HandleLocationReport 解码并校验位置 JSON，缺少采样时间时使用服务端当前时间。
-// 当前实现只记录结果，不持久化位置轨迹。
-func (s *MessageService) HandleLocationReport(deviceID uint64, body []byte) error {
-	var report LocationReport
-
-	if err := json.Unmarshal(body, &report); err != nil {
-		return fmt.Errorf("decode location report: %w", err)
-	}
-
-	if report.Longitude < -180 || report.Longitude > 180 {
-		return errors.New("longitude must be between -180 and 180")
-	}
-
-	if report.Latitude < -90 || report.Latitude > 90 {
-		return errors.New("latitude must be between -90 and 90")
-	}
-
-	if report.Timestamp.IsZero() {
-		report.Timestamp = time.Now()
-	}
-
-	log.Printf(
-		"location report: device=%d longitude=%f latitude=%f altitude=%f time=%s",
-		deviceID,
-		report.Longitude,
-		report.Latitude,
-		report.Altitude,
-		report.Timestamp.Format(time.RFC3339),
-	)
-
-	return nil
 }

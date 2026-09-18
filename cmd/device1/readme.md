@@ -1,0 +1,1 @@
+go run .\cmd\device1 -server 公网服务器IP:8308 -message "FRP UDP 回显测试"
