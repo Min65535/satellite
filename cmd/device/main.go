@@ -84,6 +84,7 @@ func main() {
 	}
 	defer conn.Close()
 
+	
 	client := &device{
 		conn: conn, deviceID: *deviceID, sessionID: uint64(time.Now().UnixNano()),
 		pending: make(map[uint64]*pendingMessage), assemblies: make(map[messageKey]*assembly),

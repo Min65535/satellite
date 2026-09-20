@@ -156,7 +156,7 @@ func (g *Gateway) Serve() error {
 	}
 }
 
-// 此模式不解析 SAT1 协议，也不启动 ACK 重传、会话清理、分片重组和业务处理逻辑。
+// 测回显调试用，此模式不解析 SAT1 协议，也不启动 ACK 重传、会话清理、分片重组和业务处理逻辑。
 func (g *Gateway) ServeForEcho() error {
 	for {
 		buffer := make([]byte, 65535)

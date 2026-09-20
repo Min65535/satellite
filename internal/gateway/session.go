@@ -2,6 +2,7 @@ package gateway
 
 // 虚拟会话管理
 import (
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -38,7 +39,7 @@ func (m *SessionManager) Touch(deviceID uint64, sessionID uint64, clientAddress,
 	if transportAddress == nil {
 		return
 	}
-
+	log.Printf("touch session: device=%d session=%d client=%s transport=%s", deviceID, sessionID, clientAddress.String(), transportAddress.String())
 	m.mu.Lock()
 	m.sessions[deviceID] = &Session{
 		DeviceID:         deviceID,
