@@ -122,9 +122,42 @@ func NewGateway(parentContext context.Context, address string, options Options, 
 	return gateway, nil
 }
 
-// Serve 当前以 UDP 回显模式运行：接收任意数据报后，将原始业务内容返回给发送方。
-// 此模式不解析 SAT1 协议，也不启动 ACK 重传、会话清理、分片重组和业务处理逻辑。
+// Serve 启动维护循环并持续接收 SAT1 数据报；并发槽满时丢包并依赖发送方重传。
 func (g *Gateway) Serve() error {
+	go g.retryLoop()
+	go g.cleanupLoop()
+
+	for {
+		buffer := make([]byte, 65535)
+		length, address, err := g.conn.ReadFromUDP(buffer)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) || errors.Is(g.ctx.Err(), context.Canceled) {
+				return nil
+			}
+			log.Printf("read UDP datagram failed: %v", err)
+			continue
+		}
+
+		// ReadFromUDP 后的 buffer 会在下一轮循环被重新使用，因此复制有效数据，
+		// 保证异步处理协程持有独立且内容稳定的数据切片。
+		data := append([]byte(nil), buffer[:length]...)
+
+		select {
+		case g.workers <- struct{}{}:
+			go func() {
+				defer func() { <-g.workers }()
+				g.handleDatagram(data, address)
+			}()
+		default:
+			// Worker 池满时直接丢弃数据报。可靠消息未收到逐分片 ACK 后会超时重传，
+			// 相比无限创建 goroutine，此策略可以避免服务端内存和调度资源耗尽。
+			log.Printf("UDP worker pool is full, packet from %s dropped", address)
+		}
+	}
+}
+
+// 此模式不解析 SAT1 协议，也不启动 ACK 重传、会话清理、分片重组和业务处理逻辑。
+func (g *Gateway) ServeForEcho() error {
 	for {
 		buffer := make([]byte, 65535)
 		length, transportAddress, err := g.conn.ReadFromUDP(buffer)
@@ -155,15 +188,6 @@ func (g *Gateway) Serve() error {
 		log.Printf("echo UDP datagram: client=%s transport=%s bytes=%d content=%s", clientAddress, transportAddress, len(data), string(data))
 	}
 }
-
-// 原 Serve 实现已临时停用，其逻辑为：
-//  1. 启动 retryLoop 和 cleanupLoop；
-//  2. 使用 ReadFromUDP 持续接收数据报；
-//  3. 从 workers 获取并发槽后，由 goroutine 调用 handleDatagram；
-//  4. worker 池满时丢包，并依靠逐分片 ACK 超时机制触发发送方重传。
-//
-// 恢复 SAT1 网关时，应让 Serve 重新启动两个维护循环，并把每个数据报交给
-// handleDatagram，而不是在这里直接调用 WriteToUDP 回显。
 
 func (g *Gateway) handleDatagram(data []byte, transportAddress *net.UDPAddr) {
 	clientAddress := transportAddress
