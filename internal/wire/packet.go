@@ -16,10 +16,10 @@ const (
 	Version    uint8  = 1          // Version 是当前协议版本，便于将来升级数据格式并拒绝不兼容版本。
 	HeaderSize        = 44         // HeaderSize 是固定包头长度，单位为字节；Payload 从偏移 44 开始。
 
-	// MaxFragmentPayload 是每个协议分片允许携带的最大业务负载，当前保守设置为 900 字节。
-	// 控制单个 UDP 数据报大小可以尽量避免底层 IP 分片；若任一 IP 分片丢失，整个 UDP 数据报都会失效。
-	// 实际值应结合卫星模块限制、运营商链路 MTU、流量成本和现场丢包率测试后调整。
-	MaxFragmentPayload = 900
+	// MaxFragmentPayload 将 44 字节包头与业务负载之和限制在单个 256 字节 UDP Payload 内。
+	MaxFragmentPayload = 212
+	AckPayloadSize     = 6
+	AckBitmapWidth     = 32
 )
 
 // MessageType 表示协议包承载的消息类别，占用包头中的 1 字节。
@@ -30,7 +30,7 @@ type MessageType uint8
 const (
 	TypeHello       MessageType = iota + 1 // TypeHello 表示设备上线或建立新会话，服务端据此记录设备地址。
 	TypeHeartbeat                          // TypeHeartbeat 表示设备心跳，用于刷新会话活跃时间和最新 UDP 地址。
-	TypeAck                                // TypeAck 表示分片确认，通知发送端停止重传对应分片。客户端与服务端都要确认
+	TypeAck                                // TypeAck 使用位图批量确认分片；ACK 自身不要求确认，避免形成确认循环。
 	TypeText                               // TypeText 表示 UTF-8 文字业务消息，较长文字可以拆分为多个分片。
 	TypeImage                              // TypeImage 表示图片二进制业务消息，通常需要分片传输和重组。
 	TypeBizRequest                         // TypeBizRequest 表示设备发起自定义的业务请求。
@@ -40,9 +40,10 @@ const (
 
 // 数据包标志位。多个标志可以通过按位或组合，并保存在包头的 Flags 字段中。
 const (
-	FlagNeedAck    uint16 = 1 << iota // FlagNeedAck 表示当前分片需要确认；接收端校验并接纳该分片后应立即回复对应分片 ACK。
-	FlagEncrypted                     // FlagEncrypted 表示 Payload 已加密，具体加解密算法由上层约定和执行。
-	FlagCompressed                    // FlagCompressed 表示 Payload 已压缩，接收端重组后需按约定解压。
+	FlagNeedAck         uint16 = 1 << iota // FlagNeedAck 表示当前分片需要聚合确认。
+	FlagEncrypted                          // FlagEncrypted 表示 Payload 已加密，具体加解密算法由上层约定和执行。
+	FlagCompressed                         // FlagCompressed 表示 Payload 已压缩，接收端重组后需按约定解压。
+	FlagMessageComplete                    // FlagMessageComplete 仅用于 ACK，表示接收端已完整重组消息。
 )
 
 // Packet 表示一个可独立通过 UDP 发送的协议分片。
@@ -176,6 +177,22 @@ func ParsePacket(data []byte) (*Packet, error) {
 // validMessageType 报告消息类型是否落在当前协议连续定义的有效区间内；零值和未知扩展值均无效。
 func validMessageType(messageType MessageType) bool {
 	return messageType >= TypeHello && messageType <= TypeError
+}
+
+// EncodeAckPayload 编码一个覆盖 baseIndex 起连续 32 个分片的确认位图。
+func EncodeAckPayload(baseIndex uint16, bitmap uint32) []byte {
+	payload := make([]byte, AckPayloadSize)
+	binary.BigEndian.PutUint16(payload[:2], baseIndex)
+	binary.BigEndian.PutUint32(payload[2:], bitmap)
+	return payload
+}
+
+// ParseAckPayload 解析聚合 ACK 的窗口起点和确认位图。
+func ParseAckPayload(payload []byte) (uint16, uint32, error) {
+	if len(payload) != AckPayloadSize {
+		return 0, 0, errors.New("invalid ACK payload length")
+	}
+	return binary.BigEndian.Uint16(payload[:2]), binary.BigEndian.Uint32(payload[2:]), nil
 }
 
 // Fragment 将一条逻辑消息切分为适合 UDP 传输的协议分片。

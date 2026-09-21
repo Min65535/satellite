@@ -101,6 +101,7 @@ func (m *SessionManager) Cleanup() {
 	for deviceID, session := range m.sessions {
 		if now.Sub(session.LastSeen) > m.timeout {
 			delete(m.sessions, deviceID)
+			log.Printf("session expired: device=%d at %s", deviceID, session.LastSeen.Format(time.RFC3339))
 		}
 	}
 }

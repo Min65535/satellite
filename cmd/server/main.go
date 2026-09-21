@@ -51,7 +51,7 @@ func main() {
 	) error {
 		switch packet.Type {
 		case wire.TypeText:
-			// 网关已在完整重组后返回空载荷 ACK；业务层只处理正文，不再把原消息回传给设备。
+			// 网关已在完整重组后返回带完成标志的聚合 ACK；业务层只处理正文，不再把原消息回传给设备。
 			return messageService.ReceiveText(
 				packet.DeviceID,
 				packet.MessageID,
@@ -75,11 +75,11 @@ func main() {
 				filePath,
 			)
 
-			// 网关返回的空载荷 ACK 已表示图片完整到达；这里不再回传图片原始内容。
+			// 网关返回的完整消息 ACK 已表示图片完整到达；这里不再回传图片原始内容。
 			return nil
 
 		case wire.TypeBizRequest:
-			// payload 是已完成全部分片重组的原始业务数据；各分片 ACK 已由网关自动返回。
+			// payload 是已完成全部分片重组的原始业务数据；聚合 ACK 已由网关自动返回。
 			return messageService.ReceiveBizRequest(
 				packet.DeviceID,
 				packet.MessageID,
@@ -110,7 +110,10 @@ func main() {
 			WriteBufferSize:   cfg.Gateway.WriteBufferSize,
 			SessionTimeout:    cfg.Gateway.SessionTimeout,
 			ReassemblyTimeout: cfg.Gateway.ReassemblyTimeout,
+			CleanupInterval:   cfg.Gateway.CleanupInterval,
 			AckTimeout:        cfg.Gateway.AckTimeout,
+			MaxAckTimeout:     cfg.Gateway.MaxAckTimeout,
+			SendWindowSize:    cfg.Gateway.SendWindowSize,
 			MaxRetries:        cfg.Gateway.MaxRetries,
 			MaxMessageSize:    cfg.Gateway.MaxMessageSize,
 			ProxyProtocolV2:   cfg.Gateway.ProxyProtocolV2,

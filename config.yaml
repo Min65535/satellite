@@ -7,7 +7,10 @@ gateway:
   write_buffer_size: 4194304
   session_timeout: 180s
   reassembly_timeout: 120s
+  cleanup_interval: 30s
   ack_timeout: 8s
+  max_ack_timeout: 30s
+  send_window_size: 4
   max_retries: 4
   max_message_size: 5242880
   # 与 frpc 的 transport.proxyProtocolVersion = "v2" 配套，用于获取客户端真实公网 IP 和端口。

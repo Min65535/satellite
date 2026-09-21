@@ -3,6 +3,7 @@ package gateway
 //UDP 分片重组
 import (
 	"errors"
+	"log"
 	"sync"
 	"time"
 
@@ -118,6 +119,7 @@ func (r *Reassembler) Cleanup() {
 	for key, item := range r.items {
 		if now.After(item.ExpiresAt) {
 			delete(r.items, key)
+			log.Printf("reassemblysembler expired: device=%d, session=%d, message=%d, type=%d at %s", key.DeviceID, key.SessionID, key.MessageID, key.Type, item.ExpiresAt.Format(time.RFC3339))
 		}
 	}
 }

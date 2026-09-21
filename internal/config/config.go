@@ -27,7 +27,10 @@ type GatewayConfig struct {
 	WriteBufferSize   int           `yaml:"write_buffer_size"`  // WriteBufferSize 是操作系统 UDP 发送缓冲区的期望字节数。
 	SessionTimeout    time.Duration `yaml:"session_timeout"`    // SessionTimeout 是设备最后活动后仍被视为在线的时长。
 	ReassemblyTimeout time.Duration `yaml:"reassembly_timeout"` // ReassemblyTimeout 是未完成分片组在最后一次新分片后保留的时长。
-	AckTimeout        time.Duration `yaml:"ack_timeout"`        // AckTimeout 是服务端发送分片后等待对应分片 ACK 的时长。
+	CleanupInterval   time.Duration `yaml:"cleanup_interval"`   // CleanupInterval 是扫描并清理过期会话、重组和历史状态的周期。
+	AckTimeout        time.Duration `yaml:"ack_timeout"`        // AckTimeout 是服务端发送分片后首次等待 ACK 的时长。
+	MaxAckTimeout     time.Duration `yaml:"max_ack_timeout"`    // MaxAckTimeout 是指数退避后的最大 ACK 等待时长。
+	SendWindowSize    int           `yaml:"send_window_size"`   // SendWindowSize 是每条消息允许同时在途的分片数。
 	MaxRetries        int           `yaml:"max_retries"`        // MaxRetries 是单个分片 ACK 超时后的最大重发次数。
 	MaxMessageSize    int           `yaml:"max_message_size"`   // MaxMessageSize 是重组或下发的一条逻辑消息允许的最大总字节数。
 	ProxyProtocolV2   bool          `yaml:"proxy_protocol_v2"`  // ProxyProtocolV2 要求每个 FRP UDP 数据报携带 Proxy Protocol v2 头并从中提取真实公网地址。
@@ -51,7 +54,10 @@ func Default() Config {
 			WriteBufferSize:   4 * 1024 * 1024,
 			SessionTimeout:    3 * time.Minute,
 			ReassemblyTimeout: 2 * time.Minute,
+			CleanupInterval:   30 * time.Second,
 			AckTimeout:        8 * time.Second,
+			MaxAckTimeout:     30 * time.Second,
+			SendWindowSize:    4,
 			MaxRetries:        4,
 			MaxMessageSize:    5 * 1024 * 1024,
 		},
@@ -107,8 +113,17 @@ func applyDefaults(cfg *Config) {
 	if cfg.Gateway.ReassemblyTimeout <= 0 {
 		cfg.Gateway.ReassemblyTimeout = defaults.Gateway.ReassemblyTimeout
 	}
+	if cfg.Gateway.CleanupInterval <= 0 {
+		cfg.Gateway.CleanupInterval = defaults.Gateway.CleanupInterval
+	}
 	if cfg.Gateway.AckTimeout <= 0 {
 		cfg.Gateway.AckTimeout = defaults.Gateway.AckTimeout
+	}
+	if cfg.Gateway.MaxAckTimeout <= 0 {
+		cfg.Gateway.MaxAckTimeout = defaults.Gateway.MaxAckTimeout
+	}
+	if cfg.Gateway.SendWindowSize <= 0 {
+		cfg.Gateway.SendWindowSize = defaults.Gateway.SendWindowSize
 	}
 	if cfg.Gateway.MaxRetries <= 0 {
 		cfg.Gateway.MaxRetries = defaults.Gateway.MaxRetries
@@ -126,6 +141,9 @@ func applyDefaults(cfg *Config) {
 
 // validate 限制内存型分片重组的单消息规模，并保证图片上限不超过 UDP 逻辑消息上限。
 func validate(cfg Config) error {
+	if cfg.Gateway.MaxAckTimeout < cfg.Gateway.AckTimeout {
+		return fmt.Errorf("gateway.max_ack_timeout cannot be less than gateway.ack_timeout")
+	}
 	if cfg.Gateway.MaxMessageSize > 64*1024*1024 {
 		return fmt.Errorf("gateway.max_message_size cannot exceed 64 MiB")
 	}
