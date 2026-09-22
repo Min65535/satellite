@@ -1,25 +1,37 @@
-// Package wire 定义卫星 UDP 链路的二进制传输协议。
-// 本包负责协议包的字段定义、二进制编解码、CRC32 完整性校验和大消息分片；
-// ACK、超时重传、分片重组及业务处理由 gateway 或设备客户端等上层组件完成。
+// Package wire 定义客户端与服务端共同使用的 SAT1 UDP 二进制线协议。
+//
+// 本包只负责与传输格式直接相关的工作：消息类型和标志位定义、固定包头编解码、
+// CRC32 完整性校验、业务负载分片，以及聚合 ACK 位图的编解码。会话维护、ACK
+// 发送时机、滑动窗口、超时重传、分片重组、消息去重和业务处理均由上层实现。
+//
+// 所有多字节整数均使用网络字节序（大端序）。当前固定包头为 44 字节，普通数据
+// 分片最多携带 212 字节业务负载，使 SAT1 数据报总长度不超过 256 字节。CRC32
+// 只能检测传输损坏，不能认证设备身份或防止篡改，生产环境仍需由上层增加 HMAC
+// 或 AEAD。
 package wire
 
 import (
 	"encoding/binary" // 按网络字节序（大端序）读写整数协议字段。
-	"errors"          // 创建协议参数或数据校验失败时返回的错误。
-	"fmt"
-	"hash/crc32" // 计算数据包 CRC32，检测传输过程中的数据损坏。
+	"errors"          // 创建固定文本的协议参数或数据校验错误。
+	"fmt"             // 创建包含实际协议版本等动态信息的错误。
+	"hash/crc32"      // 计算 IEEE CRC32，检测数据报在传输过程中的意外损坏。
 )
 
-// 固定协议参数。发送端和接收端必须使用完全一致的值，否则无法互相解析数据包。
+// 固定协议参数。客户端和服务端必须使用完全一致的值，否则无法互相解析数据报。
 const (
-	Magic      uint32 = 0x53415431 // Magic 是协议魔数，ASCII 为“SAT1”，用于快速识别本协议数据包。
-	Version    uint8  = 1          // Version 是当前协议版本，便于将来升级数据格式并拒绝不兼容版本。
-	HeaderSize        = 44         // HeaderSize 是固定包头长度，单位为字节；Payload 从偏移 44 开始。
+	Magic      uint32 = 0x53415431 // Magic 是协议魔数，十六进制对应 ASCII“SAT1”，用于快速过滤非本协议数据。
+	Version    uint8  = 1          // Version 是线协议版本；包头布局发生不兼容变化时必须递增。
+	HeaderSize        = 44         // HeaderSize 是固定包头字节数，Payload 紧跟在偏移 44 之后。
 
-	// MaxFragmentPayload 将 44 字节包头与业务负载之和限制在单个 256 字节 UDP Payload 内。
+	// MaxFragmentPayload 是普通数据分片允许携带的最大业务字节数。
+	// 它与 HeaderSize 相加正好为 256，避免 SAT1 层数据报超过卫星模块的单包限制。
 	MaxFragmentPayload = 212
-	AckPayloadSize     = 6
-	AckBitmapWidth     = 32
+
+	// AckPayloadSize 是聚合 ACK 负载长度：2 字节起始分片索引加 4 字节确认位图。
+	AckPayloadSize = 6
+
+	// AckBitmapWidth 是一个聚合 ACK 位图可表示的分片数量；uint32 的每一位对应一个分片。
+	AckBitmapWidth = 32
 )
 
 // MessageType 表示协议包承载的消息类别，占用包头中的 1 字节。
@@ -27,41 +39,63 @@ const (
 type MessageType uint8
 
 // 协议支持的消息类型。数值从 1 开始，0 保留为未定义值，便于发现未初始化字段。
+// 常量顺序属于线协议的一部分：修改顺序会改变编码值并导致旧客户端误解消息类型，新增类型应追加在末尾。
 const (
-	TypeHello       MessageType = iota + 1 // TypeHello 表示设备上线或建立新会话，服务端据此记录设备地址。
-	TypeHeartbeat                          // TypeHeartbeat 表示设备心跳，用于刷新会话活跃时间和最新 UDP 地址。
-	TypeAck                                // TypeAck 使用位图批量确认分片；ACK 自身不要求确认，避免形成确认循环。
-	TypeText                               // TypeText 表示 UTF-8 文字业务消息，较长文字可以拆分为多个分片。
-	TypeImage                              // TypeImage 表示图片二进制业务消息，通常需要分片传输和重组。
-	TypeBizRequest                         // TypeBizRequest 表示设备发起自定义的业务请求。
-	TypeBizResponse                        // TypeBizResponse 表示服务端返回的自定义的业务响应，与请求共用 MessageID。
-	TypeError                              // TypeError 表示协议层或业务层错误消息，供扩展统一错误通知。
+	TypeError       MessageType = iota + 1 // TypeError 表示协议层或业务层错误通知，Payload 格式由业务层约定。
+	TypeHello                              // TypeHello 表示设备上线或建立新会话；通常为空负载且不进入可靠重传队列。
+	TypeHeartbeat                          // TypeHeartbeat 表示设备心跳，仅用于刷新会话活跃时间和最新 UDP 地址。
+	TypeAck                                // TypeAck 使用 Payload 中的位图批量确认分片；ACK 自身不得设置 FlagNeedAck。
+	TypeText                               // TypeText 表示 UTF-8 文字消息，超过单片上限时由 Fragment 拆分。
+	TypeImage                              // TypeImage 表示图片二进制消息，接收端完整重组后再交给图片业务处理。
+	TypeShotMsg                            // TypeShotMsg 表示短消息业务数据，其 Payload 结构由双方业务协议约定。
+	TypeEmail                              // TypeEmail 表示邮件业务数据，其 Payload 结构由双方业务协议约定。
+	TypeBizRequest                         // TypeBizRequest 表示设备发起的自定义业务请求。
+	TypeBizResponse                        // TypeBizResponse 表示服务端业务响应，并与对应请求复用 MessageID。
 )
 
-// 数据包标志位。多个标志可以通过按位或组合，并保存在包头的 Flags 字段中。
+// 数据包标志位。多个标志可以按位或组合后写入 Flags；未定义位必须保持为零。
 const (
-	FlagNeedAck         uint16 = 1 << iota // FlagNeedAck 表示当前分片需要聚合确认。
-	FlagEncrypted                          // FlagEncrypted 表示 Payload 已加密，具体加解密算法由上层约定和执行。
-	FlagCompressed                         // FlagCompressed 表示 Payload 已压缩，接收端重组后需按约定解压。
-	FlagMessageComplete                    // FlagMessageComplete 仅用于 ACK，表示接收端已完整重组消息。
+	FlagNeedAck         uint16 = 1 << iota // FlagNeedAck 要求接收端发送聚合 ACK；只能用于需要可靠投递的数据分片。
+	FlagEncrypted                          // FlagEncrypted 表示 Payload 已加密；算法、密钥和认证标签格式由上层约定。
+	FlagCompressed                         // FlagCompressed 表示逻辑消息已压缩；接收端应在完整重组后统一解压。
+	FlagMessageComplete                    // FlagMessageComplete 仅用于 TypeAck，表示整条消息已重组并通过校验。
 )
 
-// Packet 表示一个可独立通过 UDP 发送的协议分片。
-// 一条文字、图片或 RPC 逻辑消息可能对应多个 Packet；这些分片通过设备、会话和消息 ID 关联，
-// 并通过 FragmentIndex 和 FragmentCount 确定顺序及完整性。
+// Packet 表示一个可独立放入 UDP Payload 发送的 SAT1 协议包。
+// 一条逻辑消息可能被拆成多个 Packet；同组分片具有相同的 DeviceID、SessionID、
+// MessageID、Type、Flags 和 FragmentCount，仅 FragmentIndex 与 Payload 不同。
+// TypeAck 也复用该结构，但其 Payload 固定为聚合确认位图，而不是业务正文。
 type Packet struct {
-	Type          MessageType // Type 指明该包是控制消息、文字、图片还是 RPC 数据。
-	Flags         uint16      // Flags 保存需确认、已加密、已压缩等可组合的协议标志。
-	DeviceID      uint64      // DeviceID 是卫星设备的稳定唯一标识，用于路由消息和隔离设备状态。
-	SessionID     uint64      // SessionID 标识设备当前启动或通信会话，防止旧会话分片混入新会话。
-	MessageID     uint64      // MessageID 标识会话内的一条逻辑消息，也用于关联 RPC 请求与响应。
-	FragmentIndex uint16      // FragmentIndex 是当前分片的零基索引，合法范围为 0 到 FragmentCount-1。
-	FragmentCount uint16      // FragmentCount 是逻辑消息的分片总数；即使负载为空也必须至少为 1。
-	Payload       []byte      // Payload 保存当前分片携带的业务数据，不包含固定协议头。
+	Type          MessageType // Type 指明控制包、聚合 ACK 或具体业务消息类型。
+	Flags         uint16      // Flags 保存可靠确认、加密、压缩和完整消息确认等组合标志。
+	DeviceID      uint64      // DeviceID 是设备的稳定唯一标识，用于会话查找、路由和状态隔离。
+	SessionID     uint64      // SessionID 标识设备本次运行会话，阻止旧会话的迟到分片混入新会话。
+	MessageID     uint64      // MessageID 标识会话内的一条逻辑消息；业务响应可复用请求的 MessageID。
+	FragmentIndex uint16      // FragmentIndex 是当前分片的零基索引，合法范围是 [0, FragmentCount)。
+	FragmentCount uint16      // FragmentCount 是整条逻辑消息的分片总数；空负载控制消息也必须为 1。
+	Payload       []byte      // Payload 是当前包负载；数据包承载业务片段，ACK 承载6字节确认信息。
 }
 
-// MarshalBinary 将 Packet 编码为卫星链路使用的二进制 UDP 数据报。
-// 它按大端序写入固定头部和负载，并基于头部前 40 字节及负载计算 CRC32；分片总数为零、分片索引越界或单片负载超过 uint16 可表示范围时返回错误。返回的字节切片可直接交给 UDP 连接发送，调用过程不会修改 Packet。
+// MarshalBinary 将 Packet 编码为可直接作为 UDP Payload 发送的 SAT1 数据报。
+// 固定包头布局如下：
+//
+//	0..3   Magic          4字节
+//	4      Version        1字节
+//	5      Type           1字节
+//	6..7   Flags          2字节
+//	8..15  DeviceID       8字节
+//	16..23 SessionID      8字节
+//	24..31 MessageID      8字节
+//	32..33 FragmentIndex  2字节
+//	34..35 FragmentCount  2字节
+//	36..37 PayloadLength  2字节
+//	38..39 Reserved       2字节，当前必须为0
+//	40..43 CRC32          4字节
+//	44..   Payload        PayloadLength字节
+//
+// 函数按大端序编码整数，并对头部前40字节与Payload计算IEEE CRC32。返回切片拥有
+// 独立存储，可直接发送；函数不会修改Packet。这里按uint16字段能力接受最大65535字节
+// Payload，普通数据分片仍应通过Fragment限制到MaxFragmentPayload。
 func (p *Packet) MarshalBinary() ([]byte, error) {
 	// 包头中的负载长度使用 uint16 保存，因此单个分片不能超过 65535 字节。
 	// 实际业务发送还应遵循更小的 MaxFragmentPayload，以减少底层 IP 分片风险。
@@ -92,10 +126,10 @@ func (p *Packet) MarshalBinary() ([]byte, error) {
 	binary.BigEndian.PutUint16(data[32:34], p.FragmentIndex)
 	binary.BigEndian.PutUint16(data[34:36], p.FragmentCount)
 	binary.BigEndian.PutUint16(data[36:38], uint16(len(p.Payload)))
-	// 38:40为保留字段。
+	// 38:40 是为后续协议扩展保留的字段，当前发送端必须写零。
 	binary.BigEndian.PutUint16(data[38:40], 0)
 
-	// 38:40 是为协议扩展预留的字段，当前保持为零；负载从固定头部之后开始复制。
+	// Payload 从固定包头之后开始写入，不包含任何额外长度或分隔符。
 	copy(data[HeaderSize:], p.Payload)
 
 	// 40:44 是 CRC32 字段。计算时该字段尚为零，只覆盖头部前 40 字节和 Payload，
@@ -108,8 +142,10 @@ func (p *Packet) MarshalBinary() ([]byte, error) {
 	return data, nil
 }
 
-// ParsePacket 校验并解析一个完整的二进制 UDP 数据报。
-// data 必须恰好包含一个协议包；函数会检查头部长度、魔数、版本、声明的负载长度、CRC32 和分片索引信息。成功时返回拥有独立负载副本的 Packet，调用方可安全复用接收缓冲区；校验失败时返回错误且不产生部分结果。
+// ParsePacket 校验并解析一个完整的 SAT1 UDP 数据报。
+// data 必须从 Magic 开始并且只包含一个协议包；如果前面还有 Proxy Protocol 等封装，
+// 调用方必须先剥离。函数校验最小长度、Magic、Version、负载长度、CRC32、身份字段和
+// 分片范围。成功返回的Packet拥有独立Payload副本，因此调用方可立即复用UDP接收缓冲区。
 func ParsePacket(data []byte) (*Packet, error) {
 	// 在读取任何固定偏移字段前先检查最小长度，避免切片越界。
 	if len(data) < HeaderSize {
@@ -154,6 +190,11 @@ func ParsePacket(data []byte) (*Packet, error) {
 		Payload:       append([]byte(nil), data[HeaderSize:]...),
 	}
 
+	// 未知类型不能交给上层分流，否则可能被误当作已有业务消息处理。
+	if !validMessageType(packet.Type) {
+		return nil, errors.New("invalid message type")
+	}
+	// 零值身份字段不具备路由意义，也会破坏会话和重组键的隔离性。
 	if packet.DeviceID == 0 {
 		return nil, errors.New("device ID cannot be zero")
 	}
@@ -174,20 +215,24 @@ func ParsePacket(data []byte) (*Packet, error) {
 	return packet, nil
 }
 
-// validMessageType 报告消息类型是否落在当前协议连续定义的有效区间内；零值和未知扩展值均无效。
+// validMessageType 报告消息类型是否落在当前连续定义的有效区间内。
+// TypeError 当前是第一个有效值，TypeBizResponse 是最后一个有效值；零值和未知扩展值均无效。
 func validMessageType(messageType MessageType) bool {
-	return messageType >= TypeHello && messageType <= TypeError
+	return messageType >= TypeError && messageType <= TypeBizResponse
 }
 
-// EncodeAckPayload 编码一个覆盖 baseIndex 起连续 32 个分片的确认位图。
+// EncodeAckPayload 编码聚合 ACK 的6字节负载。
+// 前2字节是确认窗口起点baseIndex，后4字节是位图；位图bit N为1表示分片
+// baseIndex+N已收到，为0表示尚未确认。该位图只表示接收状态，不直接要求发送方重传。
 func EncodeAckPayload(baseIndex uint16, bitmap uint32) []byte {
 	payload := make([]byte, AckPayloadSize)
-	binary.BigEndian.PutUint16(payload[:2], baseIndex)
-	binary.BigEndian.PutUint32(payload[2:], bitmap)
+	binary.BigEndian.PutUint16(payload[0:2], baseIndex)
+	binary.BigEndian.PutUint32(payload[2:6], bitmap)
 	return payload
 }
 
-// ParseAckPayload 解析聚合 ACK 的窗口起点和确认位图。
+// ParseAckPayload 解析由EncodeAckPayload生成的聚合ACK负载。
+// 长度必须严格等于6字节，避免截断数据或未来扩展格式被当前版本错误解释。
 func ParseAckPayload(payload []byte) (uint16, uint32, error) {
 	if len(payload) != AckPayloadSize {
 		return 0, 0, errors.New("invalid ACK payload length")
@@ -195,8 +240,10 @@ func ParseAckPayload(payload []byte) (uint16, uint32, error) {
 	return binary.BigEndian.Uint16(payload[:2]), binary.BigEndian.Uint32(payload[2:]), nil
 }
 
-// Fragment 将一条逻辑消息切分为适合 UDP 传输的协议分片。
-// messageType、flags、deviceID、sessionID 和 messageID 会原样写入每个分片，payload 按 MaxFragmentPayload 顺序切片；空负载仍生成一个分片。返回的每个 Packet 都持有负载的独立副本，分片数超过 uint16 上限时返回错误；ACK、重传与接收端重组由上层负责。
+// Fragment 将一条逻辑消息按MaxFragmentPayload切分成有序Packet。
+// 所有分片复用相同的消息元数据，仅索引和Payload不同；空负载也会生成一个
+// FragmentIndex=0、FragmentCount=1的合法控制包。返回的Payload均为独立副本，调用方
+// 后续修改原始payload不会影响待发送分片。该函数不编码、不发送，也不负责ACK和重传。
 func Fragment(messageType MessageType, flags uint16, deviceID uint64, sessionID uint64, messageID uint64, payload []byte) ([]*Packet, error) {
 	if deviceID == 0 {
 		return nil, errors.New("device ID cannot be zero")

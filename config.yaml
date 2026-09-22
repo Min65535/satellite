@@ -1,5 +1,5 @@
 server:
-  udp_address: ":8308"
+  udp_address: ":8309"
 
 gateway:
   worker_count: 128
