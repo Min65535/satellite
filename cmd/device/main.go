@@ -203,8 +203,15 @@ func (d *device) send(messageType wire.MessageType, payload []byte, reliable boo
 	return messageID, nil
 }
 
+// fillWindowLocked 使用 nextRetry 中已登记的索引作为当前在途分片集合，
+// 只补充空闲窗口，不会提前启动尚未发送分片的重试计时。调用方必须持有 d.mu。
 func (d *device) fillWindowLocked(item *pendingMessage, now time.Time) [][]byte {
 	available := sendWindowSize - len(item.nextRetry)
+	// 正常情况下在途数量不会超过窗口大小。这里仍做下限保护，避免状态异常时
+	// 将负数作为 make 容量并触发 makeslice: cap out of range。
+	if available <= 0 {
+		return nil
+	}
 	result := make([][]byte, 0, available)
 	for available > 0 && item.nextIndex < item.fragmentCount {
 		index := item.nextIndex
@@ -469,8 +476,19 @@ func (d *device) maintenance(ctx context.Context) {
 			}
 			for messageID, item := range d.pending {
 				failed := false
-				for index, data := range item.packets {
-					if now.Before(item.nextRetry[index]) {
+				// nextRetry 只包含已经进入滑动窗口并实际发送过的在途分片。
+				// 不能遍历 item.packets：其中还包含尚未进入窗口的后续分片，若提前
+				// 为它们创建重试状态，会使在途数量超过 sendWindowSize，并破坏窗口推进。
+				for index, retryAt := range item.nextRetry {
+					if now.Before(retryAt) {
+						continue
+					}
+					data, exists := item.packets[index]
+					if !exists {
+						// ACK 处理正常会同时删除 packets 与 nextRetry；此分支仅清理
+						// 潜在的不一致状态，避免对不存在的分片执行空数据重传。
+						delete(item.nextRetry, index)
+						delete(item.retries, index)
 						continue
 					}
 					if item.retries[index] >= maxRetries {
