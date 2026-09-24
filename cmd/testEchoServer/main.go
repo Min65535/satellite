@@ -116,7 +116,6 @@ func main() {
 			SendWindowSize:    cfg.Gateway.SendWindowSize,
 			MaxRetries:        cfg.Gateway.MaxRetries,
 			MaxMessageSize:    cfg.Gateway.MaxMessageSize,
-			ProxyProtocolV2:   cfg.Gateway.ProxyProtocolV2,
 		},
 		messageHandler,
 	)

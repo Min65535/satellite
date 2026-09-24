@@ -79,7 +79,7 @@ func (g *Gateway) sendReliableWithID(deviceID uint64, messageID uint64, messageT
 	g.pendingMu.Unlock()
 
 	for _, fragment := range toSend {
-		if _, err := g.conn.WriteToUDP(fragment.data, session.TransportAddress); err != nil {
+		if _, err := g.conn.WriteToUDP(fragment.data, session.Address); err != nil {
 			g.markFailed(key, err.Error())
 			return err
 		}
@@ -147,7 +147,7 @@ func (g *Gateway) confirm(deviceID uint64, messageID uint64, fragmentCount uint1
 		return
 	}
 	for _, fragment := range toSend {
-		if _, err := g.conn.WriteToUDP(fragment.data, session.TransportAddress); err != nil {
+		if _, err := g.conn.WriteToUDP(fragment.data, session.Address); err != nil {
 			log.Printf("send window fragment failed: device=%d message=%d fragment=%d error=%v", deviceID, messageID, fragment.index, err)
 		}
 	}
@@ -239,7 +239,7 @@ func (g *Gateway) retryExpiredMessages() {
 			continue
 		}
 		for _, fragment := range batch.packets {
-			if _, err := g.conn.WriteToUDP(fragment.data, session.TransportAddress); err != nil {
+			if _, err := g.conn.WriteToUDP(fragment.data, session.Address); err != nil {
 				log.Printf("retransmit fragment failed: device=%d message=%d fragment=%d error=%v", batch.key.DeviceID, batch.key.MessageID, fragment.index, err)
 			}
 		}

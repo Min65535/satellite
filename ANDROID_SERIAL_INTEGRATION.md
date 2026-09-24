@@ -15,7 +15,7 @@ Android ForegroundService
   └─ 会话：启动 Hello、空闲 Heartbeat、Session 生命周期
           │ USB Serial / UART
           ▼
-      卫星通信模块 ── UDP/卫星链路/可选 FRP ── Go Gateway
+      卫星通信模块 ── UDP/卫星链路 ── Go Gateway
 ```
 
 Android 端负责：
@@ -466,7 +466,7 @@ fun frameForTransparentSerial(datagram: ByteArray): ByteArray {
 
 厂商发送回执不等于服务端 ACK：前者最多用于判断串口写入/模块受理失败，只有合法 `TypeAck` 的位图能释放分片窗口，只有带 `FlagMessageComplete` 的 ACK 能产生 Delivered。
 
-Android 端不要生成 FRP Proxy Protocol v2 头。该头在启用时由 FRP 注入并由 Gateway 剥离；App 交给模块的数据必须从 SAT1 Magic `53 41 54 31` 开始。
+App 交给模块的数据必须从 SAT1 Magic `53 41 54 31` 开始。
 
 ## 9. Kotlin 可靠客户端骨架
 
@@ -848,13 +848,12 @@ USB Host 通常需要：
 
 应用需通过 `UsbManager.requestPermission()` 配合 `PendingIntent` 请求用户授权，并处理设备 attach/detach。USB 授权不是普通运行时权限；具体 VID/PID filter、广播注册方式和 Android 版本要求按现有 targetSdk 与串口库配置。若 App 自己直接联网，还需 `INTERNET`；若只有外接模块联网，则以实际功能决定。Foreground Service 的声明、权限和 service type 必须符合当前 targetSdk 与业务用途。
 
-## 13. 业务响应与 FRP
+## 13. 业务响应
 
 - Text/Image 默认只得到传输 ACK 和最终完整 ACK，Gateway 不回显正文。
 - `TypeBizResponse=10` 复用对应 `TypeBizRequest=9` 的 MessageID；业务层通过 MessageID 关联结果。
 - 请求与响应 Type 不同，必须分别重组、去重和确认。
 - 传输完整 ACK 只表示消息到达，业务成功与否由 BizResponse Payload 定义。
-- Android 与卫星模块不添加 FRP Proxy Protocol v2 头；由 FRP 处理，Gateway 在配置开启时剥离。
 
 ## 14. 接入时序
 
@@ -903,7 +902,6 @@ Android                    Gateway
 - [ ] 启动只发一次无 NeedAck Hello，Gateway 不回复。
 - [ ] 每 30 秒检查，连续 120 秒无业务/心跳才发无 NeedAck Heartbeat，Gateway 只 Touch。
 - [ ] 超过 `session_timeout=180s` 无合法包后离线；前后台、Doze、USB 拔插恢复策略有效。
-- [ ] FRP 部署时 App 数据仍以 SAT1 Magic 开头，代理头由 FRP 处理。
 
 ## 16. 上线前硬件确认
 

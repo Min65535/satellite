@@ -33,7 +33,6 @@ type GatewayConfig struct {
 	SendWindowSize    int           `yaml:"send_window_size"`   // SendWindowSize 是每条消息允许同时在途的分片数。
 	MaxRetries        int           `yaml:"max_retries"`        // MaxRetries 是单个分片 ACK 超时后的最大重发次数。
 	MaxMessageSize    int           `yaml:"max_message_size"`   // MaxMessageSize 是重组或下发的一条逻辑消息允许的最大总字节数。
-	ProxyProtocolV2   bool          `yaml:"proxy_protocol_v2"`  // ProxyProtocolV2 要求每个 FRP UDP 数据报携带 Proxy Protocol v2 头并从中提取真实公网地址。
 }
 
 // StorageConfig 定义上行图片在本机文件系统中的存储策略。

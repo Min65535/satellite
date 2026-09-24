@@ -30,7 +30,7 @@ Active --距最近业务发送 >=120s--> 发送 Heartbeat（无需 ACK）
 Active --close()/不可恢复错误--> Stopped
 ```
 
-服务端接收**任何通过 SAT1 解析校验的合法包**后都会 `Touch(DeviceID, SessionID, clientAddress, transportAddress)`，随后才按类型处理。相同 `DeviceID` 的新 `SessionID` 表示新运行会话；客户端必须丢弃设备或会话不匹配的下行包。
+服务端接收**任何通过 SAT1 解析校验的合法包**后都会 `Touch(DeviceID, SessionID, address)`，随后才按类型处理。相同 `DeviceID` 的新 `SessionID` 表示新运行会话；客户端必须丢弃设备或会话不匹配的下行包。
 
 ### 可靠发送状态
 
@@ -704,7 +704,7 @@ final class UdpEndpointTransport implements SatTransport {
 }
 ```
 
-实际项目只保留 `UdpEndpointTransport` 即可。公网 Flutter 客户端发送内容必须从 SAT1 Magic 开始，**不要添加 Proxy Protocol v2 头**。该头由启用相应配置的 frpc/frps 注入并由 Go Gateway 剥离；当前 `config.yaml` 的 `proxy_protocol_v2` 为 `false`。
+实际项目只保留 `UdpEndpointTransport` 即可。公网 Flutter 客户端发送内容必须从 SAT1 Magic 开始。
 
 卫星硬件若通过串口提供字节流，串口本身没有 UDP 数据报边界。Transport 必须加帧，例如 `uint16 big-endian length + 完整 SAT1 datagram`，并拒绝长度 `<44` 或 `>256`。串口库属于硬件选型，不能伪造一个不存在的依赖；可把已有串口插件的输入流和写函数注入如下适配器：
 
@@ -1335,4 +1335,3 @@ Gateway                         SatClient
 - [ ] 任意合法 ACK/业务包刷新服务端会话；超过 180 秒无合法包后离线。
 - [ ] 前后台切换、Doze、断网恢复、Wi-Fi/蜂窝切换后重建 Session 的策略有效。
 - [ ] Android INTERNET 权限、真机 UDP、防火墙/NAT、串口长度前缀拆包/粘包测试通过。
-- [ ] 经 FRP 部署时由 frpc/frps 添加 Proxy Protocol v2；Flutter 数据报首字节仍是 SAT1 Magic，不添加代理头。

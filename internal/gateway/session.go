@@ -9,13 +9,11 @@ import (
 )
 
 // Session 是网关根据最近有效 UDP 数据报维护的设备虚拟会话。
-// ClientAddress 用于展示和审计，TransportAddress 才是下行回复地址；FRP 场景下二者通常不同。
 type Session struct {
-	DeviceID         uint64       // DeviceID 是设备稳定标识，也是会话表的键。
-	SessionID        uint64       // SessionID 区分同一设备的不同启动或通信周期。
-	ClientAddress    *net.UDPAddr // ClientAddress 是 FRP 公网入口观察到的客户端公网 NAT 地址。
-	TransportAddress *net.UDPAddr // TransportAddress 是本机直接收到数据报的 FRP 传输地址，下行必须发往该地址。
-	LastSeen         time.Time    // LastSeen 是最后一次收到该设备合法协议包的本机时间。
+	DeviceID  uint64       // DeviceID 是设备稳定标识，也是会话表的键。
+	SessionID uint64       // SessionID 区分同一设备的不同启动或通信周期。
+	Address   *net.UDPAddr // Address 是最近收到设备数据报的 UDP 地址，也是下行回复地址。
+	LastSeen  time.Time    // LastSeen 是最后一次收到该设备合法协议包的本机时间。
 }
 
 // SessionManager 并发安全地按设备 ID 保存最新虚拟会话，并以空闲超时判断在线状态。
@@ -33,20 +31,19 @@ func NewSessionManager(timeout time.Duration) *SessionManager {
 	}
 }
 
-// Touch 用数据报携带的会话 ID、真实客户端地址和 FRP 传输地址替换设备记录并刷新活跃时间。
-// 两个地址均会深拷贝；transportAddress 是可靠下行必须使用的路由，不能为空。
-func (m *SessionManager) Touch(deviceID uint64, sessionID uint64, clientAddress, transportAddress *net.UDPAddr) {
-	if transportAddress == nil {
+// Touch 用数据报携带的会话 ID 和 UDP 地址替换设备记录并刷新活跃时间。
+// 地址会被深拷贝，且作为可靠下行使用的路由，不能为空。
+func (m *SessionManager) Touch(deviceID uint64, sessionID uint64, address *net.UDPAddr) {
+	if address == nil {
 		return
 	}
-	log.Printf("touch session: device=%d session=%d client=%s transport=%s", deviceID, sessionID, clientAddress.String(), transportAddress.String())
+	log.Printf("touch session: device=%d session=%d address=%s", deviceID, sessionID, address.String())
 	m.mu.Lock()
 	m.sessions[deviceID] = &Session{
-		DeviceID:         deviceID,
-		SessionID:        sessionID,
-		ClientAddress:    cloneUDPAddr(clientAddress),
-		TransportAddress: cloneUDPAddr(transportAddress),
-		LastSeen:         time.Now(),
+		DeviceID:  deviceID,
+		SessionID: sessionID,
+		Address:   cloneUDPAddr(address),
+		LastSeen:  time.Now(),
 	}
 	m.mu.Unlock()
 }
@@ -113,8 +110,7 @@ func cloneSession(session *Session) *Session {
 	}
 
 	result := *session
-	result.ClientAddress = cloneUDPAddr(session.ClientAddress)
-	result.TransportAddress = cloneUDPAddr(session.TransportAddress)
+	result.Address = cloneUDPAddr(session.Address)
 	return &result
 }
 

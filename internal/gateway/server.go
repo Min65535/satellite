@@ -24,7 +24,6 @@ type Options struct {
 	SendWindowSize    int           // SendWindowSize 是每条下行消息同时在途的最大分片数。
 	MaxRetries        int           // MaxRetries 是单个下行分片允许的最大重发次数。
 	MaxMessageSize    int           // MaxMessageSize 是单条逻辑消息重组或下发允许的最大总字节数。
-	ProxyProtocolV2   bool          // ProxyProtocolV2 要求解析 FRP 为每个 UDP 数据报添加的 Proxy Protocol v2 头。
 }
 
 // MessageHandler 接收通过协议校验、完整重组和消息去重后的业务负载。
@@ -178,7 +177,7 @@ func (g *Gateway) Serve() error {
 func (g *Gateway) ServeForEcho() error {
 	for {
 		buffer := make([]byte, 65535)
-		length, transportAddress, err := g.conn.ReadFromUDP(buffer)
+		length, address, err := g.conn.ReadFromUDP(buffer)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || errors.Is(g.ctx.Err(), context.Canceled) {
 				return nil
@@ -187,47 +186,19 @@ func (g *Gateway) ServeForEcho() error {
 			continue
 		}
 
-		// 直连时直接回显完整 UDP Payload。通过启用 Proxy Protocol v2 的 FRP 转发时，
-		// 先剥离代理头，只把客户端原始业务内容沿 transportAddress 返回给 frpc。
 		data := buffer[:length]
-		clientAddress := transportAddress
-		if g.options.ProxyProtocolV2 {
-			clientAddress, data, err = parseProxyProtocolV2(data)
-			if err != nil {
-				log.Printf("discard invalid Proxy Protocol v2 datagram from %s: %v", transportAddress, err)
-				continue
-			}
-		}
-
-		if _, err := g.conn.WriteToUDP(data, transportAddress); err != nil {
-			log.Printf("echo UDP datagram failed: client=%s transport=%s error=%v", clientAddress, transportAddress, err)
+		if _, err := g.conn.WriteToUDP(data, address); err != nil {
+			log.Printf("echo UDP datagram failed: address=%s error=%v", address, err)
 			continue
 		}
-		log.Printf("echo UDP datagram: client=%s transport=%s bytes=%d content=%s", clientAddress, transportAddress, len(data), string(data))
+		log.Printf("echo UDP datagram: address=%s bytes=%d content=%s", address, len(data), string(data))
 	}
 }
 
-func (g *Gateway) handleDatagram(data []byte, transportAddress *net.UDPAddr) {
-	clientAddress := transportAddress
-	payload := data
-
-	if g.options.ProxyProtocolV2 {
-		var err error
-		clientAddress, payload, err = parseProxyProtocolV2(data)
-		if err != nil {
-			log.Printf("discard invalid Proxy Protocol v2 datagram from %s: %v", transportAddress, err)
-			return
-		}
-	}
-
-	packet, err := wire.ParsePacket(payload)
+func (g *Gateway) handleDatagram(data []byte, address *net.UDPAddr) {
+	packet, err := wire.ParsePacket(data)
 	if err != nil {
-		log.Printf(
-			"discard invalid UDP packet from client=%s transport=%s: %v",
-			clientAddress,
-			transportAddress,
-			err,
-		)
+		log.Printf("discard invalid UDP packet from %s: %v", address, err)
 		return
 	}
 
@@ -236,8 +207,7 @@ func (g *Gateway) handleDatagram(data []byte, transportAddress *net.UDPAddr) {
 
 	   当前MVP只有CRC32，无法防止攻击者伪造DeviceID并劫持下行地址。
 	*/
-	// 真实地址仅用于识别和审计；所有 ACK 与下行数据仍经 transportAddress 返回 FRP。
-	g.sessions.Touch(packet.DeviceID, packet.SessionID, clientAddress, transportAddress)
+	g.sessions.Touch(packet.DeviceID, packet.SessionID, address)
 
 	switch packet.Type {
 	case wire.TypeAck:
@@ -250,12 +220,7 @@ func (g *Gateway) handleDatagram(data []byte, transportAddress *net.UDPAddr) {
 		return
 
 	case wire.TypeHello:
-		log.Printf(
-			"device online: device=%d client=%s transport=%s",
-			packet.DeviceID,
-			clientAddress,
-			transportAddress,
-		)
+		log.Printf("device online: device=%d address=%s", packet.DeviceID, address)
 		// 当前 Hello 不要求 ACK；会话已由上面的 Touch 建立，避免额外下行流量。
 		return
 
@@ -268,7 +233,7 @@ func (g *Gateway) handleDatagram(data []byte, transportAddress *net.UDPAddr) {
 	// MessageComplete ACK，不能重新创建残缺重组项，否则发送方会永久等待完整确认。
 	if g.wasCompleted(packet) {
 		if packet.Flags&wire.FlagNeedAck != 0 {
-			g.queueAck(packet, transportAddress, true)
+			g.queueAck(packet, address, true)
 		}
 		return
 	}
@@ -285,7 +250,7 @@ func (g *Gateway) handleDatagram(data []byte, transportAddress *net.UDPAddr) {
 	}
 
 	if packet.Flags&wire.FlagNeedAck != 0 {
-		g.queueAck(packet, transportAddress, completed)
+		g.queueAck(packet, address, completed)
 	}
 
 	if !completed {

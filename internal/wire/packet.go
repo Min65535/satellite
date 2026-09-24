@@ -128,6 +128,14 @@ func (p *Packet) MarshalBinary() ([]byte, error) {
 	binary.BigEndian.PutUint16(data[36:38], uint16(len(p.Payload)))
 	// 38:40 是为后续协议扩展保留的字段，当前发送端必须写零。
 	binary.BigEndian.PutUint16(data[38:40], 0)
+	// 这里是“预留字段”。当前协议没有使用它，但提前在固定包头中保留两个字节，后续可以扩展为：
+	// - 加密算法编号；
+	// - 压缩算法编号；
+	// - 协议子版本；
+	// - 链路优先级；
+	// - 设备能力标志；
+	// - 其他扩展字段。
+	// 当前版本还没有定义用途，所以必须写0：
 
 	// Payload 从固定包头之后开始写入，不包含任何额外长度或分隔符。
 	copy(data[HeaderSize:], p.Payload)
@@ -143,9 +151,9 @@ func (p *Packet) MarshalBinary() ([]byte, error) {
 }
 
 // ParsePacket 校验并解析一个完整的 SAT1 UDP 数据报。
-// data 必须从 Magic 开始并且只包含一个协议包；如果前面还有 Proxy Protocol 等封装，
-// 调用方必须先剥离。函数校验最小长度、Magic、Version、负载长度、CRC32、身份字段和
-// 分片范围。成功返回的Packet拥有独立Payload副本，因此调用方可立即复用UDP接收缓冲区。
+// data 必须从 Magic 开始并且只包含一个协议包。函数校验最小长度、Magic、Version、
+// 负载长度、CRC32、身份字段和分片范围。成功返回的Packet拥有独立Payload副本，
+// 因此调用方可立即复用UDP接收缓冲区。
 func ParsePacket(data []byte) (*Packet, error) {
 	// 在读取任何固定偏移字段前先检查最小长度，避免切片越界。
 	if len(data) < HeaderSize {
@@ -157,6 +165,11 @@ func ParsePacket(data []byte) (*Packet, error) {
 	}
 	if data[4] != Version {
 		return nil, fmt.Errorf("unsupported protocol version: %d", data[4])
+	}
+	// 38:40 是当前协议尚未定义用途的预留字段。发送端必须写零，接收端也必须
+	// 拒绝非零值，避免未来赋予该字段新语义后，旧程序悄悄忽略并错误处理新格式。
+	if binary.BigEndian.Uint16(data[38:40]) != 0 {
+		return nil, errors.New("reserved field must be zero")
 	}
 
 	// UDP 保留数据报边界，因此实际数据长度必须与包头声明值完全一致；
@@ -201,10 +214,6 @@ func ParsePacket(data []byte) (*Packet, error) {
 	if packet.SessionID == 0 {
 		return nil, errors.New("session ID cannot be zero")
 	}
-	if packet.FragmentCount == 0 {
-		return nil, errors.New("fragment count cannot be zero")
-	}
-
 	// 分片总数必须至少为 1，且当前索引必须落在总数范围内，
 	// 否则上层无法为该消息建立安全、确定的重组数组。
 	if packet.FragmentCount == 0 ||
